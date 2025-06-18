@@ -538,7 +538,7 @@ initial begin
     $display("Status register: 0x%08x", status_data);
 
       pattern_time = end_time - start_time;
-      $display("Pattern #%0d Duration: %0t ns", p, pattern_time);
+      $display("Pattern #%0d Duration: %0t ps", p, pattern_time);
 
     repeat(50) @(posedge aclk);
   end
@@ -550,8 +550,8 @@ initial begin
     $display("Patterns Passed      : %0d", passed_tests);
     $display("Patterns Failed      : %0d", failed_tests);
     $display("Overall Status       : %s", (failed_tests==0) ? "ALL PASSED" : "FAILURES DETECTED");
-    $display("Each Test run Time   : %0t ns", pattern_time);
-    $display("Total Simulation Time: %0t ns", $time);
+    $display("Each Test run Time   : %0t ps", pattern_time);
+    $display("Total Simulation Time: %0t ps", $time);
     $display("=============================================");
 
   $display("\n=== Test Completed ===");
