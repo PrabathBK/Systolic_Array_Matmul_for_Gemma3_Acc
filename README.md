@@ -42,5 +42,5 @@ This implements a parameterizable **systolic array matrix multiplier** with:
 ---
 
 ### How to Simulate
-Clone this repository and navigate to the Final_Stage3 folder.Make sure to compile all RTL modules (pe.v, systolic_array_with_buffers.v, systolic_array_axi_stream.v) first.Use your simulator (Vivado xsim, Questa, VCS, etc.) to compile tb_systolic_array_axi_stream.sv and run the simulation.
+Clone this repository and navigate to the Scalable_sytolic_matmul_axi folder.Make sure to compile all RTL modules (pe.v, systolic_array_with_buffers.v, systolic_array_axi_stream.v) first.Use your simulator (Vivado xsim, Questa, VCS, etc.) to compile tb_systolic_array_axi_stream.sv and run the simulation.
 
