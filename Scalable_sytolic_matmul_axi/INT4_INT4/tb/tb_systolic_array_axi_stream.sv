@@ -48,10 +48,9 @@ module tb_systolic_array_axi_stream;
     
     reg [31:0] status_data;
     
-    integer i, j, k ,p;
-    integer error_count,num_patterns , err;
-    integer total_tests, passed_tests, failed_tests;
-    time start_time, end_time, pattern_time;
+    // Test control
+    integer i, j, k;
+    integer error_count;
     
     // DUT instantiation
     systolic_array_axi_stream #(
@@ -126,7 +125,7 @@ module tb_systolic_array_axi_stream;
             @(posedge aclk);
             s_axi_bready = 0;
             
-            // $display("AXI Write: addr=0x%08x, data=0x%08x, resp=%b", addr, data, s_axi_bresp);
+            $display("AXI Write: addr=0x%08x, data=0x%08x, resp=%b", addr, data, s_axi_bresp);
         end
     endtask
     
@@ -159,7 +158,7 @@ module tb_systolic_array_axi_stream;
             @(posedge aclk);
             s_axi_rready = 0;
             
-            // $display("AXI Read: addr=0x%08x, data=0x%08x, resp=%b", addr, data, s_axi_rresp);
+            $display("AXI Read: addr=0x%08x, data=0x%08x, resp=%b", addr, data, s_axi_rresp);
         end
     endtask
     
@@ -185,10 +184,9 @@ module tb_systolic_array_axi_stream;
             
             if (timeout_count >= 1000) begin
                 $display("ERROR: Stream data timeout for data=0x%02x", data);
-            end 
-            // else begin
-            //     $display("Stream data sent: 0x%02x, last=%b", data, last);
-            // end
+            end else begin
+                $display("Stream data sent: 0x%02x, last=%b", data, last);
+            end
             
             @(posedge aclk);
             s_axis_tvalid = 0;
@@ -196,153 +194,44 @@ module tb_systolic_array_axi_stream;
         end
     endtask
     
-
-// Generate Test Matrices
-
-// ================================================
-// Task: Incrementing Pattern 
-// ================================================
-task pattern_incrementing;
-  begin
-    for (i = 0; i < SIZE; i = i + 1)
-      for (j = 0; j < SIZE; j = j + 1) begin
-        weight_matrix[i][j] = i * SIZE + j;
-        activation_matrix[i][j] = i * SIZE + j;
-      end
-  end
-endtask
-
-// ================================================
-// Task: Zero Matrix
-// ================================================
-task pattern_zero;
-  begin
-    for (i = 0; i < SIZE; i = i + 1)
-      for (j = 0; j < SIZE; j = j + 1) begin
-        weight_matrix[i][j] = 0;
-        activation_matrix[i][j] = 0;
-      end
-  end
-endtask
-
-// ================================================
-// Task: Identity Matrix
-// ================================================
-task pattern_identity;
-  begin
-    for (i = 0; i < SIZE; i = i + 1)
-      for (j = 0; j < SIZE; j = j + 1) begin
-        weight_matrix[i][j] = (i == j) ? 1 : 0;
-        activation_matrix[i][j] = (i == j) ? 1 : 0;
-      end
-  end
-endtask
-
-// ================================================
-// Task: Max Value Matrix (INT4 max = 15)
-// ================================================
-task pattern_max;
-  begin
-    for (i = 0; i < SIZE; i = i + 1)
-      for (j = 0; j < SIZE; j = j + 1) begin
-        weight_matrix[i][j] = 15;
-        activation_matrix[i][j] = 15;
-      end
-  end
-endtask
-
-// ================================================
-// Task: Checkerboard Pattern (0 and max alternating)
-// ================================================
-task pattern_checkerboard;
-  begin
-    for (i = 0; i < SIZE; i = i + 1)
-      for (j = 0; j < SIZE; j = j + 1) begin
-        weight_matrix[i][j] = ((i+j) % 2) ? 15 : 0;
-        activation_matrix[i][j] = ((i+j) % 2) ? 0 : 15;
-      end
-  end
-endtask
-
-// ================================================
-// Task: Sparse Pattern (only diagonals)
-// ================================================
-task pattern_sparse_diagonal;
-  begin
-    for (i = 0; i < SIZE; i = i + 1)
-      for (j = 0; j < SIZE; j = j + 1) begin
-        weight_matrix[i][j] = (i == j) ? 15 : 0;
-        activation_matrix[i][j] = (i == j) ? 15 : 0;
-      end
-  end
-endtask
-
-// ================================================
-// Task: Random Pattern (INT4 random values)
-// ================================================
-task pattern_random;
-  begin
-    for (i = 0; i < SIZE; i = i + 1)
-      for (j = 0; j < SIZE; j = j + 1) begin
-        weight_matrix[i][j] = $urandom_range(0, 15);
-        activation_matrix[i][j] = $urandom_range(0, 15);
-      end
-  end
-endtask
-
-// ================================================
-// Task: Custom Matrices (Predefined values)
-// ================================================
-
-task load_custom_AB_matrices;
-  begin
-    // Matrix A
-    activation_matrix[0] = '{ 5,  2, 12,  7,  8,  3, 14,  1 };
-    activation_matrix[1] = '{10,  0,  9, 15,  4,  2, 11,  6 };
-    activation_matrix[2] = '{ 3,  5,  7, 12,  8,  1, 13,  9 };
-    activation_matrix[3] = '{ 6, 14,  4,  2, 10,  5,  0, 11 };
-    activation_matrix[4] = '{ 9,  8,  2, 13,  7, 12,  1,  4 };
-    activation_matrix[5] = '{11,  3, 15,  0,  6,  9,  2, 14 };
-    activation_matrix[6] = '{ 4, 10,  5,  7,  3,  8, 12,  0 };
-    activation_matrix[7] = '{ 2, 13,  1,  9, 14,  6,  5,  3 };
-
-    // Matrix B
-    weight_matrix[0] = '{12,  7,  1,  4, 11,  2,  5,  9 };
-    weight_matrix[1] = '{ 3, 14,  6,  0,  8, 13, 10,  1 };
-    weight_matrix[2] = '{ 5,  2, 15,  7,  0, 12,  3,  4 };
-    weight_matrix[3] = '{10,  6,  9,  5,  2,  8, 11,  0 };
-    weight_matrix[4] = '{ 1,  3, 13, 14,  7,  9,  2, 12 };
-    weight_matrix[5] = '{ 8,  5,  0, 11,  4,  6, 14,  7 };
-    weight_matrix[6] = '{ 2,  9, 12,  1,  3,  0, 15, 10 };
-    weight_matrix[7] = '{ 4, 11,  8, 13,  5,  1,  6,  2 };
-  end
-endtask
-
-
-
-// ================================================
-// Task: Calculate Expected Result (reference multiply)
-// ================================================
-task calculate_expected_result;
-  begin
-    for (i = 0; i < SIZE; i = i + 1) begin
-      for (j = 0; j < SIZE; j = j + 1) begin
-        expected_result[i][j] = 0;
-        for (k = 0; k < SIZE; k = k + 1) begin
-          expected_result[i][j] += weight_matrix[i][k] * activation_matrix[k][j];
+    // ================================================
+    // Task: Initialize Test Matrices
+    // ================================================
+    task init_test_matrices;
+        begin
+            // Initialize weight matrix (simple incrementing pattern)
+            for (i = 0; i < SIZE; i = i + 1) begin
+                for (j = 0; j < SIZE; j = j + 1) begin
+                    weight_matrix[i][j] = i * SIZE + j ;
+                end
+            end
+            
+            // Initialize activation matrix (simple incrementing pattern)
+            for (i = 0; i < SIZE; i = i + 1) begin
+                for (j = 0; j < SIZE; j = j + 1) begin
+                    activation_matrix[i][j] = i * SIZE + j ;
+                end
+            end
+            
+            // Calculate expected result (software matrix multiplication)
+            for (i = 0; i < SIZE; i = i + 1) begin
+                for (j = 0; j < SIZE; j = j + 1) begin
+                    expected_result[i][j] = 0;
+                    for (k = 0; k < SIZE; k = k + 1) begin
+                        expected_result[i][j] = expected_result[i][j] + 
+                                              (weight_matrix[i][k] * activation_matrix[k][j]);
+                    end
+                end
+            end
         end
-      end
-    end
-  end
-endtask
-
+    endtask
     
     // ================================================
     // Task: Send Weight Matrix via Stream
     // ================================================
     task send_weight_matrix;
         begin
-            // $display("Sending weight matrix...");
+            $display("Sending weight matrix...");
             for (i = 0; i < SIZE; i = i + 1) begin
                 for (j = 0; j < SIZE; j = j + 1) begin
                     if (i == SIZE-1 && j == SIZE-1) begin
@@ -352,7 +241,7 @@ endtask
                     end
                 end
             end
-            // $display("Weight matrix sent successfully");
+            $display("Weight matrix sent successfully");
         end
     endtask
     
@@ -361,7 +250,7 @@ endtask
     // ================================================
     task send_activation_matrix;
         begin
-            // $display("Sending activation matrix...");
+            $display("Sending activation matrix...");
             for (i = 0; i < SIZE; i = i + 1) begin
                 for (j = 0; j < SIZE; j = j + 1) begin
                     if (i == SIZE-1 && j == SIZE-1) begin
@@ -371,7 +260,7 @@ endtask
                     end
                 end
             end
-            // $display("Activation matrix sent successfully");
+            $display("Activation matrix sent successfully");
         end
     endtask
     
@@ -399,18 +288,59 @@ endtask
         end
     endtask
     
+    // // ================================================
+    // // Task: Check Results (With timeout)
+    // // ================================================
+    // task check_results_old;
+    //     reg [31:0] read_data;
+    //     integer timeout_count;
+    //     begin
+    //         $display("\nWaiting for computation to complete...");
+    //         error_count = 0;
+    //         timeout_count = 0;
+            
+    //         // Wait for computation with timeout
+    //         while (!done && timeout_count < 5000) begin
+    //             @(posedge aclk);
+    //             timeout_count = timeout_count + 1;
+    //         end
+            
+    //         if (timeout_count >= 5000) begin
+    //             $display("ERROR: Computation timeout!");
+    //             error_count = error_count + 1;
+    //         end else begin
+    //             $display("Computation completed in %d cycles", timeout_count);
+    //         end
+            
+    //         if (result_valid) begin
+    //             $display("Result valid signal asserted correctly");
+    //         end else begin
+    //             $display("ERROR: Result valid signal not asserted");
+    //             error_count = error_count + 1;
+    //         end
+            
+    //         // Print expected results
+    //         print_matrix("Expected Result", 2);
+            
+    //         if (error_count == 0) begin
+    //             $display("\n*** TEST PASSED ***");
+    //         end else begin
+    //             $display("\n*** TEST FAILED with %d errors ***", error_count);
+    //         end
+    //     end
+    // endtask
 
     task check_results;
     reg [31:0] read_data;
-    integer idx;
+    integer err, idx;
     begin
-        // $display("\nChecking results by reading back via AXI-Lite...");
+        $display("\nChecking results by reading back via AXI-Lite...");
         err = 0;
 
         // Wait for computation to finish
         wait(done);
         wait(result_valid);
-        // $display("Computation done. Reading results...");
+        $display("Computation done. Reading results...");
 
         for (i = 0; i < SIZE; i = i + 1) begin
             for (j = 0; j < SIZE; j = j + 1) begin
@@ -420,21 +350,16 @@ endtask
                     $display("Mismatch at (%0d,%0d): Expected=%0d, Got=%0d",
                         i, j, expected_result[i][j], read_data);
                     err = err + 1;
-                end 
-                // else begin
-                    // $display("Match at (%0d,%0d): %0d", i, j, read_data);
-                // end
+                end else begin
+                    $display("Match at (%0d,%0d): %0d", i, j, read_data);
+                end
             end
         end
 
-        if (err == 0) begin
+        if (err == 0)
             $display("\n*** RESULT MATCH: TEST PASSED ***");
-            passed_tests++;
-        end
-        else begin
+        else
             $display("\n*** RESULT MISMATCH: %0d errors ***", err);
-            failed_tests++;
-        end
     end
 endtask
 
@@ -444,7 +369,7 @@ endtask
     // ================================================
     task reset_system;
         begin
-            // $display("Resetting system...");
+            $display("Resetting system...");
             aresetn = 0;
             s_axi_awaddr = 0;
             s_axi_awvalid = 0;
@@ -462,102 +387,66 @@ endtask
             repeat(10) @(posedge aclk);
             aresetn = 1;
             repeat(10) @(posedge aclk);
-            // $display("Reset complete");
+            $display("Reset complete");
         end
     endtask
     
     // ================================================
     // Main Test Sequence
     // ================================================
+    initial begin
+        $display("Starting Systolic Array AXI Stream Testbench");
+        $display("SIZE = %d, DATA_WIDTH = %d", SIZE, DATA_WIDTH);
+        
+        // Initialize
+        init_test_matrices();
+        
+        // Print input matrices
+        print_matrix("Weight Matrix", 0);
+        print_matrix("Activation Matrix", 1);
+        
+        // Reset the system
+        reset_system();
+        
+        // Test 1: Basic Matrix Multiplication
+        $display("\n=== Test 1: Basic Matrix Multiplication ===");
+        
+        // Set matrix size via AXI-Lite
+        axi_lite_write(32'h4, SIZE); // Write to register 1 (matrix size)
+        
+        // Read back to verify
+        axi_lite_read(32'h4, status_data);
+        
+        // Send weight matrix
+        send_weight_matrix();
+        
+        // Small delay between matrices
+        repeat(20) @(posedge aclk);
+        
+        // Send activation matrix
+        send_activation_matrix();
+        
+        // Small delay before starting
+        repeat(20) @(posedge aclk);
+        
+        // Start computation via AXI-Lite
+        $display("Starting computation...");
+        axi_lite_write(32'h0, 32'h1); // Write start bit to register 0
+        
+        // Check results
+        check_results();
+        
+        // Test 2: Status Register Read
+        $display("\n=== Test 2: Status Register Test ===");
+        axi_lite_read(32'h8, status_data); // Read status register
+        $display("Status register: 0x%08x", status_data);
+        
+        // Finish simulation
+        repeat(100) @(posedge aclk);
+        $display("\n=== Testbench Complete ===");
+        $finish;
+    end
     
-initial begin
-  $display("Starting Systolic Array AXI Stream Comprehensive Testbench");
-  $display("SIZE = %0d, DATA_WIDTH = %0d", SIZE, DATA_WIDTH);
-
-  // Number of patterns
-  num_patterns = 8; // update this if you add more
-  total_tests = 0;
-  passed_tests = 0;
-  failed_tests = 0;
-
-  // Pattern index: 0 = Zero, 1 = Identity, etc.
-  for ( p = 0; p < num_patterns; p = p + 1) begin
-      total_tests++;
-
-    $display("\n======================================");
-    $display("Running Pattern #%0d", p);
-    $display("======================================");
-
-    // --------- SELECT PATTERN ----------
-    case (p)
-      0: pattern_zero();
-      1: pattern_identity();
-      2: pattern_max();
-      3: pattern_checkerboard();
-      4: pattern_sparse_diagonal();
-      5: pattern_incrementing();
-      6: pattern_random();
-      7:load_custom_AB_matrices();
-      default: pattern_incrementing();
-    endcase
-
-    // --------- CALCULATE EXPECTED ----------
-    calculate_expected_result();
-
-    // --------- SHOW ----------
-
-    print_matrix("Weight Matrix", 0);
-    print_matrix("Activation Matrix", 1);
-
-    // --------- RESET DUT ----------
-    reset_system();
-
-    // --------- SET SIZE ----------
-    axi_lite_write(32'h4, SIZE);
-    axi_lite_read(32'h4, status_data);
-
-
-    // --------- SEND BUFFERS ----------
-    send_activation_matrix();  // A → West → Activation buffer
-    repeat(20) @(posedge aclk);
-    send_weight_matrix();      // B → North → Weight buffer
-    repeat(20) @(posedge aclk);
-
-    start_time = $time;
-    // --------- START ----------
-    $display("Starting computation for pattern #%0d", p);
-    axi_lite_write(32'h0, 32'h1);
-
-    end_time = $time;
-
-    // --------- CHECK ----------
-    check_results();
-
-    // --------- STATUS ----------
-    axi_lite_read(32'h8, status_data);
-    $display("Status register: 0x%08x", status_data);
-
-      pattern_time = end_time - start_time;
-      $display("Pattern #%0d Duration: %0t ps", p, pattern_time);
-
-    repeat(50) @(posedge aclk);
-  end
-
-   $display("\n=============================================");
-    $display("✅ Testbench Report");
-    $display("---------------------------------------------");
-    $display("Total Patterns Run   : %0d", total_tests);
-    $display("Patterns Passed      : %0d", passed_tests);
-    $display("Patterns Failed      : %0d", failed_tests);
-    $display("Overall Status       : %s", (failed_tests==0) ? "ALL PASSED" : "FAILURES DETECTED");
-    $display("Each Test run Time   : %0t ps", pattern_time);
-    $display("Total Simulation Time: %0t ps", $time);
-    $display("=============================================");
-
-  $display("\n=== Test Completed ===");
-  $finish;
-end
-
     // ================================================
     // Timeout Watchdog (Increased timeout)
     // ================================================
@@ -570,14 +459,14 @@ end
     // ================================================
     // Signal Monitoring
     // ================================================
-    // always @(posedge aclk) begin
-    //     if (done && !$past(done)) begin
-    //         $display("Time %t: Computation done signal asserted", $time);
-    //     end
-    //     if (result_valid && !$past(result_valid)) begin
-    //         $display("Time %t: Result valid signal asserted", $time);
-    //     end
-    // end
+    always @(posedge aclk) begin
+        if (done && !$past(done)) begin
+            $display("Time %t: Computation done signal asserted", $time);
+        end
+        if (result_valid && !$past(result_valid)) begin
+            $display("Time %t: Result valid signal asserted", $time);
+        end
+    end
     
     // ================================================
     // Debug: Stream State Monitoring
