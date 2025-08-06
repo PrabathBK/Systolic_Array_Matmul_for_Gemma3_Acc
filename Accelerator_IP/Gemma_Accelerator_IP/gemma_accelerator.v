@@ -93,6 +93,8 @@ module gemma_accelerator #(
   reg [5:0]   awaddr_latched;
   reg [31:0]  wdata_latched;
 
+  
+
   // State register
   always @(posedge ap_clk) begin
     if (!ap_rst_n)
@@ -218,8 +220,13 @@ module gemma_accelerator #(
         if (m_axi_gmem_arready) next_state = S_FETCH_ACT_DATA;
       end
 
-      S_FETCH_ACT_DATA: if (m_axi_gmem_rvalid && m_axi_gmem_rready)
-        if (m_axi_gmem_rlast) next_state = S_FETCH_WGT_ADDR;
+      S_FETCH_ACT_DATA: begin
+        m_axi_gmem_rready = 1'b1;
+        if (m_axi_gmem_rvalid && m_axi_gmem_rready && m_axi_gmem_rlast)
+          next_state = S_FETCH_WGT_ADDR;
+      end
+      // S_FETCH_ACT_DATA: if (m_axi_gmem_rvalid && m_axi_gmem_rready)
+      //   if (m_axi_gmem_rlast) next_state = S_FETCH_WGT_ADDR;
 
       S_FETCH_WGT_ADDR: begin
         m_axi_gmem_arvalid = 1'b1;
@@ -228,8 +235,14 @@ module gemma_accelerator #(
         if (m_axi_gmem_arready) next_state = S_FETCH_WGT_DATA;
       end
 
-      S_FETCH_WGT_DATA: if (m_axi_gmem_rvalid && m_axi_gmem_rready)
-        if (m_axi_gmem_rlast) next_state = S_WRITE_OUT_ADDR;
+      S_FETCH_WGT_DATA: begin
+        m_axi_gmem_rready = 1'b1;
+        if (m_axi_gmem_rvalid && m_axi_gmem_rready && m_axi_gmem_rlast)
+          next_state = S_WRITE_OUT_ADDR;
+      end
+
+      // S_FETCH_WGT_DATA: if (m_axi_gmem_rvalid && m_axi_gmem_rready)
+      //   if (m_axi_gmem_rlast) next_state = S_WRITE_OUT_ADDR;
 
       S_WRITE_OUT_ADDR: begin
         m_axi_gmem_awvalid = 1'b1;
@@ -238,9 +251,15 @@ module gemma_accelerator #(
         if (m_axi_gmem_awready) next_state = S_WRITE_OUT_DATA;
       end
 
+      // S_WRITE_OUT_DATA: begin
+      //   m_axi_gmem_wvalid = 1'b1;
+      //   m_axi_gmem_wlast  = (beat_counter == 8'd15);
+      //   if (m_axi_gmem_wready && m_axi_gmem_wlast) next_state = S_WAIT_WRITE_END;
+      // end
       S_WRITE_OUT_DATA: begin
         m_axi_gmem_wvalid = 1'b1;
-        m_axi_gmem_wlast  = (beat_counter == 8'd15);
+        m_axi_gmem_wdata = 128'hDEADBEEF_CAFEBABE_12345678_87654321; // Fixed dummy
+        m_axi_gmem_wlast = (beat_counter == 8'd15);
         if (m_axi_gmem_wready && m_axi_gmem_wlast) next_state = S_WAIT_WRITE_END;
       end
 
