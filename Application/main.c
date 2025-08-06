@@ -21,9 +21,9 @@ UL g_dtb_address;
 // Matrix geometry
 #define MATRIX_SIZE     16
 #define NUM_ELEMENTS    (MATRIX_SIZE * MATRIX_SIZE)
-#define MATRIX_A_ADDR   0x20000
-#define MATRIX_B_ADDR   0x21000
-#define MATRIX_C_ADDR   0x22000
+#define MATRIX_A_ADDR   0x21000
+#define MATRIX_B_ADDR   0x22000
+#define MATRIX_C_ADDR   0x23000
 
 // Simple MMIO write
 static inline void write_reg(unsigned int addr, unsigned int val) {
