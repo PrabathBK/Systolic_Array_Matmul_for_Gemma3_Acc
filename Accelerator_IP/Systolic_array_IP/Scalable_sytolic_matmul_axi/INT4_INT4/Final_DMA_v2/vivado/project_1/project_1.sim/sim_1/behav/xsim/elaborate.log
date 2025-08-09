@@ -1,0 +1,12 @@
+Vivado Simulator v2024.2.0
+Copyright 1986-2022 Xilinx, Inc. All Rights Reserved.
+Copyright 2022-2024 Advanced Micro Devices, Inc. All Rights Reserved.
+Running: /tools/Xilinx/Vivado/2024.2/bin/unwrapped/lnx64.o/xelab --incr --debug typical --relax --mt 8 -L xil_defaultlib -L uvm -L unisims_ver -L unimacro_ver -L secureip --snapshot tb_systolic_array_acc_behav xil_defaultlib.tb_systolic_array_acc xil_defaultlib.glbl -log elaborate.log 
+Using 8 slave threads.
+Starting static elaboration
+Pass Through NonSizing Optimizer
+WARNING: [VRFC 10-9543] actual bit length 6 differs from formal bit length 7 for port 'weight_addr' [/home/prabathbk/dvcon/src/Systolic_Array_Matmul_for_Gemma3_Acc/Accelerator_IP/Systolic_array_IP/Scalable_sytolic_matmul_axi/INT4_INT4/Final_DMA_v2/rtl/systolic_array_axi_stream.v:203]
+WARNING: [VRFC 10-9543] actual bit length 6 differs from formal bit length 7 for port 'activation_addr' [/home/prabathbk/dvcon/src/Systolic_Array_Matmul_for_Gemma3_Acc/Accelerator_IP/Systolic_array_IP/Scalable_sytolic_matmul_axi/INT4_INT4/Final_DMA_v2/rtl/systolic_array_axi_stream.v:206]
+WARNING: [VRFC 10-9543] actual bit length 8 differs from formal bit length 4 for port 'matrix_size' [/home/prabathbk/dvcon/src/Systolic_Array_Matmul_for_Gemma3_Acc/Accelerator_IP/Systolic_array_IP/Scalable_sytolic_matmul_axi/INT4_INT4/Final_DMA_v2/rtl/systolic_array_axi_stream.v:208]
+Completed static elaboration
+INFO: [XSIM 43-4323] No Change in HDL. Linking previously generated obj files to create kernel

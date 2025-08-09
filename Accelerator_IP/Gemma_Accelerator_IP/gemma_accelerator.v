@@ -1,6 +1,7 @@
+
 module gemma_accelerator #(
   parameter integer ID_WIDTH = 12,
-  parameter integer BUFFER_DEPTH = 256,
+  parameter integer BUFFER_DEPTH = 20,
   parameter integer BUFFER_ADDR_WIDTH = $clog2(BUFFER_DEPTH),
   parameter integer SYSTOLIC_SIZE = 16,
   parameter integer DATA_WIDTH = 8,
@@ -63,7 +64,7 @@ module gemma_accelerator #(
   input  wire [1:0]            m_axi_gmem_rresp
 );
 
-  // FSM states (removed dequantization state)
+  // FSM states
   localparam [3:0]
     S_IDLE             = 4'd0,
     S_FETCH_ACT_ADDR   = 4'd1,
@@ -76,7 +77,7 @@ module gemma_accelerator #(
     S_WAIT_WRITE_END   = 4'd8,  
     S_DONE             = 4'd9;
 
-  // AXI-Lite register offsets (removed dequantization parameters)
+  // AXI-Lite register offsets
   localparam [5:0]
     ADDR_CTRL     = 6'h00,
     ADDR_STATUS   = 6'h04,
@@ -111,21 +112,31 @@ module gemma_accelerator #(
   reg [BUFFER_ADDR_WIDTH-1:0]   wgt_buf_rd_addr;
   wire [127:0]                  wgt_buf_rd_data;
 
+  // Matrix data storage - unpacked from buffers for easier indexing
+  reg signed [DATA_WIDTH-1:0]   activation_matrix [0:SYSTOLIC_SIZE-1][0:SYSTOLIC_SIZE-1];
+  reg signed [DATA_WIDTH-1:0]   weight_matrix [0:SYSTOLIC_SIZE-1][0:SYSTOLIC_SIZE-1];
+
   // Systolic Array signals
   reg                           systolic_accum_reset;
-  reg signed [SYSTOLIC_SIZE*DATA_WIDTH-1:0]  systolic_north_inputs; // 128 bits
-  reg signed [SYSTOLIC_SIZE*DATA_WIDTH-1:0]  systolic_west_inputs;  // 128 bits
-  wire signed [SYSTOLIC_SIZE*SYSTOLIC_SIZE*ACCUM_WIDTH-1:0] systolic_results; // 5120 bits (16×16×20)
+  reg signed [DATA_WIDTH-1:0]   systolic_north_inputs [0:SYSTOLIC_SIZE-1];
+  reg signed [DATA_WIDTH-1:0]   systolic_west_inputs [0:SYSTOLIC_SIZE-1];
+  // NEW: Valid signals for systolic array
+  reg [SYSTOLIC_SIZE-1:0]       systolic_north_valid;
+  reg [SYSTOLIC_SIZE-1:0]       systolic_west_valid;
+  wire signed [SYSTOLIC_SIZE*SYSTOLIC_SIZE*ACCUM_WIDTH-1:0] systolic_results;
 
-  // Systolic control
-  reg [7:0]                     systolic_cycle_count;
-  reg [3:0]                     current_k;
+  // FIXED: Separate counters for proper timing control
+  reg [7:0]                     systolic_cycle_count;    // Overall cycle counter
+  reg [7:0]                     input_cycle_count;       // Input feeding cycle counter
   reg                           systolic_computing;
+  reg                           matrices_loaded;
+  reg                           activation_loaded;
+  reg                           weight_loaded;
 
-  // Result management (truncate 20-bit accumulator results to 16-bit for storage)
+  // Result management
   reg [ACCUM_WIDTH-1:0]         result_matrix [0:SYSTOLIC_SIZE-1][0:SYSTOLIC_SIZE-1];
-  reg [15:0]                    result_matrix_16bit [0:SYSTOLIC_SIZE-1][0:SYSTOLIC_SIZE-1]; // INT16 storage
-  reg [127:0]                   output_data_buffer [0:31]; // 32 x 128-bit output words (8 INT16 values per word)
+  reg [15:0]                    result_matrix_16bit [0:SYSTOLIC_SIZE-1][0:SYSTOLIC_SIZE-1];
+  reg [127:0]                   output_data_buffer [0:31];
   reg [4:0]                     output_buffer_idx;
   reg                           capture_results;
 
@@ -157,7 +168,19 @@ module gemma_accelerator #(
     .rd_data(wgt_buf_rd_data)
   );
 
-  // Systolic Array instantiation
+  // Pack systolic inputs for module interface
+  wire signed [SYSTOLIC_SIZE*DATA_WIDTH-1:0] systolic_north_packed;
+  wire signed [SYSTOLIC_SIZE*DATA_WIDTH-1:0] systolic_west_packed;
+  
+  genvar g;
+  generate
+    for (g = 0; g < SYSTOLIC_SIZE; g = g + 1) begin : pack_inputs
+      assign systolic_north_packed[(g+1)*DATA_WIDTH-1:g*DATA_WIDTH] = systolic_north_inputs[g];
+      assign systolic_west_packed[(g+1)*DATA_WIDTH-1:g*DATA_WIDTH] = systolic_west_inputs[g];
+    end
+  endgenerate
+
+  // Systolic Array instantiation with valid signals
   systolic_array_16x16 #(
     .SIZE(SYSTOLIC_SIZE),
     .DATA_WIDTH(DATA_WIDTH),
@@ -166,21 +189,26 @@ module gemma_accelerator #(
     .clk(ap_clk),
     .rst(~ap_rst_n),
     .accum_reset(systolic_accum_reset),
-    .north_inputs(systolic_north_inputs),
-    .west_inputs(systolic_west_inputs),
+    .north_inputs(systolic_north_packed),
+    .west_inputs(systolic_west_packed),
+    .north_valid(systolic_north_valid),    // NEW
+    .west_valid(systolic_west_valid),      // NEW
     .result_matrix(systolic_results)
   );
 
-  // State machine and counters
+  // FIXED: State machine and counters with proper timing
   always @(posedge ap_clk) begin
     if (!ap_rst_n) begin
       current_state <= S_IDLE;
       beat_counter <= 8'd0;
       systolic_cycle_count <= 8'd0;
-      current_k <= 4'd0;
+      input_cycle_count <= 8'd0;
       output_buffer_idx <= 5'd0;
       systolic_computing <= 1'b0;
       capture_results <= 1'b0;
+      matrices_loaded <= 1'b0;
+      activation_loaded <= 1'b0;
+      weight_loaded <= 1'b0;
     end else begin
       current_state <= next_state;
       
@@ -194,35 +222,105 @@ module gemma_accelerator #(
                (current_state == S_WRITE_OUT_DATA && m_axi_gmem_wvalid && m_axi_gmem_wready))
         beat_counter <= beat_counter + 1'b1;
 
-      // Systolic computation control
+      // FIXED: Matrix loading status tracking
+      if (current_state == S_FETCH_ACT_DATA && m_axi_gmem_rvalid && m_axi_gmem_rready && m_axi_gmem_rlast)
+        activation_loaded <= 1'b1;
+      else if (current_state == S_IDLE)
+        activation_loaded <= 1'b0;
+
+      if (current_state == S_FETCH_WGT_DATA && m_axi_gmem_rvalid && m_axi_gmem_rready && m_axi_gmem_rlast)
+        weight_loaded <= 1'b1;
+      else if (current_state == S_IDLE)
+        weight_loaded <= 1'b0;
+
+      // Both matrices loaded - give one extra cycle for stabilization
+      matrices_loaded <= activation_loaded && weight_loaded;
+
+      // FIXED: Systolic computation control with proper timing
       if (current_state == S_SYSTOLIC_COMPUTE) begin
-        systolic_computing <= 1'b1;
         systolic_cycle_count <= systolic_cycle_count + 1'b1;
         
-        // Advance K dimension
-        if (current_k < 4'd15) begin
-          current_k <= current_k + 1'b1;
+        // Only start feeding inputs when matrices are confirmed loaded
+        if (matrices_loaded) begin
+          systolic_computing <= 1'b1;
+          input_cycle_count <= input_cycle_count + 1'b1;
+          
+          // Start capturing results after pipeline fills + computation completes
+          // 16 input cycles + 15 propagation cycles = 31 total minimum
+          if (systolic_cycle_count >= 8'd32) begin
+            capture_results <= 1'b1;
+          end
         end else begin
-          current_k <= 4'd0;
-        end
-        
-        // Start capturing results after pipeline fills
-        if (systolic_cycle_count >= 8'd31) begin
-          capture_results <= 1'b1;
+          systolic_computing <= 1'b0;
+          input_cycle_count <= 8'd0;
         end
       end else begin
         systolic_computing <= 1'b0;
         systolic_cycle_count <= 8'd0;
-        current_k <= 4'd0;
+        input_cycle_count <= 8'd0;
         capture_results <= 1'b0;
       end
 
-      // Output buffer management (32 beats for INT16 results)
+      // Output buffer management
       if (current_state == S_WRITE_OUT_DATA && m_axi_gmem_wvalid && m_axi_gmem_wready) begin
         if (output_buffer_idx < 5'd31)
           output_buffer_idx <= output_buffer_idx + 1'b1;
       end else if (current_state == S_IDLE) begin
         output_buffer_idx <= 5'd0;
+      end
+    end
+  end
+
+  // Matrix unpacking from buffers - same as before but with additional delay
+  integer unpack_i, unpack_j;
+  always @(posedge ap_clk) begin
+    if (!ap_rst_n) begin
+      // Initialize matrices
+      for (unpack_i = 0; unpack_i < SYSTOLIC_SIZE; unpack_i = unpack_i + 1) begin
+        for (unpack_j = 0; unpack_j < SYSTOLIC_SIZE; unpack_j = unpack_j + 1) begin
+          activation_matrix[unpack_i][unpack_j] <= 8'd0;
+          weight_matrix[unpack_i][unpack_j] <= 8'd0;
+        end
+      end
+    end else begin
+      // Unpack activation matrix when loading completes
+      if (current_state == S_FETCH_ACT_DATA && m_axi_gmem_rvalid && m_axi_gmem_rready) begin
+        activation_matrix[beat_counter][0]  <= $signed(m_axi_gmem_rdata[7:0]);
+        activation_matrix[beat_counter][1]  <= $signed(m_axi_gmem_rdata[15:8]);
+        activation_matrix[beat_counter][2]  <= $signed(m_axi_gmem_rdata[23:16]);
+        activation_matrix[beat_counter][3]  <= $signed(m_axi_gmem_rdata[31:24]);
+        activation_matrix[beat_counter][4]  <= $signed(m_axi_gmem_rdata[39:32]);
+        activation_matrix[beat_counter][5]  <= $signed(m_axi_gmem_rdata[47:40]);
+        activation_matrix[beat_counter][6]  <= $signed(m_axi_gmem_rdata[55:48]);
+        activation_matrix[beat_counter][7]  <= $signed(m_axi_gmem_rdata[63:56]);
+        activation_matrix[beat_counter][8]  <= $signed(m_axi_gmem_rdata[71:64]);
+        activation_matrix[beat_counter][9]  <= $signed(m_axi_gmem_rdata[79:72]);
+        activation_matrix[beat_counter][10] <= $signed(m_axi_gmem_rdata[87:80]);
+        activation_matrix[beat_counter][11] <= $signed(m_axi_gmem_rdata[95:88]);
+        activation_matrix[beat_counter][12] <= $signed(m_axi_gmem_rdata[103:96]);
+        activation_matrix[beat_counter][13] <= $signed(m_axi_gmem_rdata[111:104]);
+        activation_matrix[beat_counter][14] <= $signed(m_axi_gmem_rdata[119:112]);
+        activation_matrix[beat_counter][15] <= $signed(m_axi_gmem_rdata[127:120]);
+      end
+      
+      // Unpack weight matrix when loading completes
+      if (current_state == S_FETCH_WGT_DATA && m_axi_gmem_rvalid && m_axi_gmem_rready) begin
+        weight_matrix[beat_counter][0]  <= $signed(m_axi_gmem_rdata[7:0]);
+        weight_matrix[beat_counter][1]  <= $signed(m_axi_gmem_rdata[15:8]);
+        weight_matrix[beat_counter][2]  <= $signed(m_axi_gmem_rdata[23:16]);
+        weight_matrix[beat_counter][3]  <= $signed(m_axi_gmem_rdata[31:24]);
+        weight_matrix[beat_counter][4]  <= $signed(m_axi_gmem_rdata[39:32]);
+        weight_matrix[beat_counter][5]  <= $signed(m_axi_gmem_rdata[47:40]);
+        weight_matrix[beat_counter][6]  <= $signed(m_axi_gmem_rdata[55:48]);
+        weight_matrix[beat_counter][7]  <= $signed(m_axi_gmem_rdata[63:56]);
+        weight_matrix[beat_counter][8]  <= $signed(m_axi_gmem_rdata[71:64]);
+        weight_matrix[beat_counter][9]  <= $signed(m_axi_gmem_rdata[79:72]);
+        weight_matrix[beat_counter][10] <= $signed(m_axi_gmem_rdata[87:80]);
+        weight_matrix[beat_counter][11] <= $signed(m_axi_gmem_rdata[95:88]);
+        weight_matrix[beat_counter][12] <= $signed(m_axi_gmem_rdata[103:96]);
+        weight_matrix[beat_counter][13] <= $signed(m_axi_gmem_rdata[111:104]);
+        weight_matrix[beat_counter][14] <= $signed(m_axi_gmem_rdata[119:112]);
+        weight_matrix[beat_counter][15] <= $signed(m_axi_gmem_rdata[127:120]);
       end
     end
   end
@@ -239,43 +337,95 @@ module gemma_accelerator #(
       wgt_buf_wr_data       <= 128'd0;
       wgt_buf_rd_addr       <= {BUFFER_ADDR_WIDTH{1'b0}};
       systolic_accum_reset  <= 1'b0;
-      systolic_north_inputs <= {SYSTOLIC_SIZE*DATA_WIDTH{1'b0}};
-      systolic_west_inputs  <= {SYSTOLIC_SIZE*DATA_WIDTH{1'b0}};
     end else begin
       // Default values
       act_buf_wr_en         <= 1'b0;
       wgt_buf_wr_en         <= 1'b0;
       systolic_accum_reset  <= 1'b0;
 
-      // Load activation data (INT8, 16 values per beat)
+      // Load activation data
       if (current_state == S_FETCH_ACT_DATA && m_axi_gmem_rvalid && m_axi_gmem_rready) begin
         act_buf_wr_en   <= 1'b1;
         act_buf_wr_addr <= beat_counter[BUFFER_ADDR_WIDTH-1:0];
         act_buf_wr_data <= m_axi_gmem_rdata;
       end
 
-      // Load weight data (INT8, 16 values per beat)
+      // Load weight data
       if (current_state == S_FETCH_WGT_DATA && m_axi_gmem_rvalid && m_axi_gmem_rready) begin
         wgt_buf_wr_en   <= 1'b1;
         wgt_buf_wr_addr <= beat_counter[BUFFER_ADDR_WIDTH-1:0];
-        wgt_buf_wr_data <= m_axi_gmem_rdata; // Full 128-bit data (16 INT8 weights)
+        wgt_buf_wr_data <= m_axi_gmem_rdata;
       end
 
-      // Systolic computation
-      if (current_state == S_SYSTOLIC_COMPUTE) begin
-        // Reset accumulator at start
-        if (systolic_cycle_count == 8'd0) begin
+      // Systolic computation with proper reset timing
+      if (current_state == S_SYSTOLIC_COMPUTE && matrices_loaded) begin
+        // Reset accumulator only once at the very start
+        if (input_cycle_count == 8'd0) begin
           systolic_accum_reset <= 1'b1;
-        end else if (systolic_computing) begin
-          // Set buffer addresses based on current K
-          act_buf_rd_addr <= current_k;
-          wgt_buf_rd_addr <= current_k;
-          
-          // Feed data to systolic array
-          systolic_west_inputs  <= $signed(act_buf_rd_data);
-          systolic_north_inputs <= $signed(wgt_buf_rd_data);
         end
       end
+    end
+  end
+
+
+  // ------------------------------------------------------------------
+// synchronous clear of all PE accumulators at the start of SYSTOLIC
+// ------------------------------------------------------------------
+always @(posedge ap_clk) begin
+  if (!ap_rst_n) begin
+    systolic_accum_reset <= 1'b1;
+  end else begin
+    // on exactly the first cycle of the compute state, hold reset high
+    if (current_state == S_SYSTOLIC_COMPUTE && systolic_cycle_count == 8'd0)
+      systolic_accum_reset <= 1'b1;
+    else
+      systolic_accum_reset <= 1'b0;
+  end
+end
+
+
+  // FIXED: Systolic array input generation with VALID SIGNAL CONTROL
+  integer skew_i;
+  always @(posedge ap_clk) begin
+    if (!ap_rst_n) begin
+      for (skew_i = 0; skew_i < SYSTOLIC_SIZE; skew_i = skew_i + 1) begin
+        systolic_north_inputs[skew_i] <= 8'd0;
+        systolic_west_inputs[skew_i] <= 8'd0;
+      end
+      systolic_north_valid <= {SYSTOLIC_SIZE{1'b0}};
+      systolic_west_valid <= {SYSTOLIC_SIZE{1'b0}};
+    end else if (current_state == S_SYSTOLIC_COMPUTE && matrices_loaded && systolic_computing) begin
+      // CRITICAL FIX: Use input_cycle_count for clean indexing starting from 0
+      for (skew_i = 0; skew_i < SYSTOLIC_SIZE; skew_i = skew_i + 1) begin
+        // Check if we should feed data to this PE at this cycle
+        if (input_cycle_count >= (skew_i + 1) && (input_cycle_count - skew_i - 1) < SYSTOLIC_SIZE) begin
+          // North inputs (weights): weights flow from north to south
+          // PE[row][col] gets weight_matrix[input_idx][col] where input_idx advances each cycle
+          systolic_north_inputs[skew_i] <= weight_matrix[input_cycle_count - skew_i - 1][skew_i];
+          
+          // West inputs (activations): activations flow from west to east  
+          // PE[row][col] gets activation_matrix[row][input_idx] where input_idx advances each cycle
+          systolic_west_inputs[skew_i] <= activation_matrix[skew_i][input_cycle_count - skew_i - 1];
+          
+          // NEW: Set valid signals when feeding actual data
+          systolic_north_valid[skew_i] <= 1'b1;
+          systolic_west_valid[skew_i] <= 1'b1;
+        end else begin
+          systolic_north_inputs[skew_i] <= 8'd0;
+          systolic_west_inputs[skew_i] <= 8'd0;
+          // NEW: Clear valid signals when not feeding actual data
+          systolic_north_valid[skew_i] <= 1'b0;
+          systolic_west_valid[skew_i] <= 1'b0;
+        end
+      end
+    end else begin
+      // Clear inputs and valid signals when not computing
+      for (skew_i = 0; skew_i < SYSTOLIC_SIZE; skew_i = skew_i + 1) begin
+        systolic_north_inputs[skew_i] <= 8'd0;
+        systolic_west_inputs[skew_i] <= 8'd0;
+      end
+      systolic_north_valid <= {SYSTOLIC_SIZE{1'b0}};
+      systolic_west_valid <= {SYSTOLIC_SIZE{1'b0}};
     end
   end
 
@@ -295,8 +445,8 @@ module gemma_accelerator #(
         output_data_buffer[i] <= 128'd0;
       end
     end else begin
-      // Capture results when computation is nearly complete (cycle 45)
-      if (capture_results && systolic_cycle_count == 8'd45) begin
+      // Capture results when computation is complete
+      if (capture_results && systolic_cycle_count == 8'd34) begin
         for (i = 0; i < SYSTOLIC_SIZE; i = i + 1) begin
           for (j = 0; j < SYSTOLIC_SIZE; j = j + 1) begin
             // Extract the 20-bit result for position [i][j]
@@ -304,27 +454,25 @@ module gemma_accelerator #(
             
             // Truncate/saturate 20-bit result to 16-bit
             if ($signed(result_matrix[i][j]) > $signed(20'd32767))
-              result_matrix_16bit[i][j] <= 16'd32767;  // Positive saturation
+              result_matrix_16bit[i][j] <= 16'd32767;
             else if ($signed(result_matrix[i][j]) < $signed(-20'd32768))
-              result_matrix_16bit[i][j] <= -16'd32768; // Negative saturation  
+              result_matrix_16bit[i][j] <= -16'd32768;
             else
               result_matrix_16bit[i][j] <= result_matrix[i][j][15:0];
           end
         end
       end
       
-      // Prepare output data buffer (pack 8×16-bit results into 128-bit words)
-      // This happens at cycle 46, before transitioning to S_WRITE_OUT_ADDR
-      if (current_state == S_SYSTOLIC_COMPUTE && systolic_cycle_count == 8'd46) begin
+      // Prepare output data buffer
+      if (current_state == S_SYSTOLIC_COMPUTE && systolic_cycle_count == 8'd35) begin
         for (i = 0; i < SYSTOLIC_SIZE; i = i + 1) begin
-          // Pack first 8 results of row i (columns 0-7)
+          // Pack 8×16-bit results per 128-bit word
           output_data_buffer[i*2] <= {
             result_matrix_16bit[i][7], result_matrix_16bit[i][6], 
             result_matrix_16bit[i][5], result_matrix_16bit[i][4],
             result_matrix_16bit[i][3], result_matrix_16bit[i][2], 
             result_matrix_16bit[i][1], result_matrix_16bit[i][0]
           };
-          // Pack remaining 8 results of row i (columns 8-15)
           output_data_buffer[i*2 + 1] <= {
             result_matrix_16bit[i][15], result_matrix_16bit[i][14], 
             result_matrix_16bit[i][13], result_matrix_16bit[i][12],
@@ -336,7 +484,7 @@ module gemma_accelerator #(
     end
   end
 
-  // AXI-Lite interface
+  // AXI-Lite interface - same as before
   assign s_axi_control_awready = (current_state == S_IDLE);
   assign s_axi_control_wready  = (current_state == S_IDLE);
   assign s_axi_control_arready = (current_state == S_IDLE) || (s_axi_control_araddr == ADDR_STATUS);
@@ -345,7 +493,7 @@ module gemma_accelerator #(
   assign s_axi_control_bid     = s_axi_control_awid;
   assign s_axi_control_rid     = s_axi_control_arid;
 
-  // AXI-Lite write logic (removed dequantization parameters)
+  // AXI-Lite write logic
   always @(posedge ap_clk) begin
     if (!ap_rst_n) begin
       s_axi_control_bvalid <= 1'b0;
@@ -400,7 +548,6 @@ module gemma_accelerator #(
       end else if (s_axi_control_arvalid && s_axi_control_arready) begin
         s_axi_control_rvalid <= 1'b1;
         case (s_axi_control_araddr)
-//          ADDR_STATUS:   s_axi_control_rdata <= {30'd0, (current_state == S_DONE), (current_state != S_IDLE)};
           ADDR_STATUS:   s_axi_control_rdata <= {30'd0, (current_state != S_IDLE), (current_state == S_DONE)};
           default:       s_axi_control_rdata <= 32'hDEADBEEF;
         endcase
@@ -408,7 +555,7 @@ module gemma_accelerator #(
     end
   end
 
-  // FSM and AXI Master interface
+  // FIXED: FSM and AXI Master interface with corrected timing
   always @(*) begin
     next_state          = current_state;
     m_axi_gmem_awid     = {ID_WIDTH{1'b0}};
@@ -461,7 +608,9 @@ module gemma_accelerator #(
       end
 
       S_SYSTOLIC_COMPUTE: begin
-        if (systolic_cycle_count >= 8'd47) // Complete matrix multiplication (back to original timing)
+        // FIXED: Wait for sufficient cycles for complete computation
+        // 16 input cycles + 15 propagation cycles + margin = 36 cycles total
+        if (systolic_cycle_count >= 8'd36)
           next_state = S_WRITE_OUT_ADDR;
       end
 

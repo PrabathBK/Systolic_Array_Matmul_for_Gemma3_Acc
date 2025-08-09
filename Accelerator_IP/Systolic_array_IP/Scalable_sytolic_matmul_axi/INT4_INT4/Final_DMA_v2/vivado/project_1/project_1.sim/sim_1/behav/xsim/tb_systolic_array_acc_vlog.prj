@@ -1,0 +1,15 @@
+# compile verilog/system verilog design source files
+verilog xil_defaultlib  \
+"../../../../../../rtl/pe.v" \
+"../../../../../../rtl/systolic_array_axi_stream.v" \
+"../../../../../../rtl/systolic_array_with_buffer.v" \
+
+sv xil_defaultlib  \
+"../../../../../../rtl/axi_memory_model.sv" \
+"../../../../../../tb/tb_systolic_array_acc.sv" \
+
+# compile glbl module
+verilog xil_defaultlib "glbl.v"
+
+# Do not sort compile order
+nosort

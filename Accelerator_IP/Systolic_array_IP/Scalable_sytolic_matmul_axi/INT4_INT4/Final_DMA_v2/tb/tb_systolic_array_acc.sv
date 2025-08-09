@@ -5,7 +5,7 @@ module tb_systolic_array_acc;
 parameter SIZE = 8;
 parameter DATA_WIDTH = 4;
 parameter ADDR_WIDTH = 64;
-parameter BUFFER_DEPTH = 64;
+parameter BUFFER_DEPTH = 128;
 parameter BASE_ADDR_A = 64;
 parameter BASE_ADDR_B = 128;
 parameter BASE_ADDR_C = 192;

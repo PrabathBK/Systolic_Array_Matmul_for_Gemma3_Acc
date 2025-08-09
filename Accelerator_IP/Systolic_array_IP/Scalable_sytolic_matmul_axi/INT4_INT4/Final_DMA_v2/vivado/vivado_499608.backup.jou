@@ -1,0 +1,50 @@
+#-----------------------------------------------------------
+# Vivado v2024.2 (64-bit)
+# SW Build 5239630 on Fri Nov 08 22:34:34 MST 2024
+# IP Build 5239520 on Sun Nov 10 16:12:51 MST 2024
+# SharedData Build 5239561 on Fri Nov 08 14:39:27 MST 2024
+# Start of session at: Fri Aug  8 20:27:53 2025
+# Process ID         : 499608
+# Current directory  : /home/prabathbk/dvcon/src/Systolic_Array_Matmul_for_Gemma3_Acc/Accelerator_IP/Systolic_array_IP/Scalable_sytolic_matmul_axi/INT4_INT4/Final_DMA_v2/vivado
+# Command line       : vivado
+# Log file           : /home/prabathbk/dvcon/src/Systolic_Array_Matmul_for_Gemma3_Acc/Accelerator_IP/Systolic_array_IP/Scalable_sytolic_matmul_axi/INT4_INT4/Final_DMA_v2/vivado/vivado.log
+# Journal file       : /home/prabathbk/dvcon/src/Systolic_Array_Matmul_for_Gemma3_Acc/Accelerator_IP/Systolic_array_IP/Scalable_sytolic_matmul_axi/INT4_INT4/Final_DMA_v2/vivado/vivado.jou
+# Running On         : prabathbk-GF63-Thin-11UC
+# Platform           : Ubuntu
+# Operating System   : Ubuntu 22.04.5 LTS
+# Processor Detail   : 11th Gen Intel(R) Core(TM) i7-11800H @ 2.30GHz
+# CPU Frequency      : 1444.583 MHz
+# CPU Physical cores : 8
+# CPU Logical cores  : 16
+# Host memory        : 16454 MB
+# Swap memory        : 0 MB
+# Total Virtual      : 16454 MB
+# Available Virtual  : 9726 MB
+#-----------------------------------------------------------
+start_gui
+open_project /home/prabathbk/dvcon/GEMMA_ACC_IP/standalone/project_1/project_1.xpr
+update_compile_order -fileset sources_1
+launch_simulation
+open_wave_config /home/prabathbk/dvcon/GEMMA_ACC_IP/standalone/project_1/gemma_accelerator_tb_behav.wcfg
+source gemma_accelerator_tb.tcl
+run all
+open_project /home/prabathbk/dvcon/src/Systolic_Array_Matmul_for_Gemma3_Acc/Accelerator_IP/Systolic_array_IP/Scalable_sytolic_matmul_axi/INT4_INT4/Final_DMA_v2/vivado/project_1/project_1.xpr
+launch_simulation
+source tb_systolic_array_acc.tcl
+update_compile_order -fileset sources_1
+current_wave_config {Untitled 1}
+add_wave {{/tb_systolic_array_acc/dut/core}} 
+current_wave_config {Untitled 1}
+add_wave {{/tb_systolic_array_acc/dut/core/\row_gen[1].col_gen[1].pe_inst }} 
+current_wave_config {Untitled 1}
+add_wave {{/tb_systolic_array_acc/dut/core/\row_gen[1].col_gen[2].pe_inst }} 
+relaunch_sim
+run all
+current_project project_1
+current_sim simulation_1
+relaunch_sim
+relaunch_sim
+close_sim
+launch_simulation
+close_project
+close_sim
