@@ -20409,3 +20409,16 @@ collapseTree(RDIResource.WaveformNameTree_WAVEFORM_NAME_TREE, "[true, Systolic_a
 // TclEventType: WAVEFORM_UPDATE_WAVEFORM
 // HMemoryUtils.trashcanNow. Engine heap size: 5,501 MB. GUI used memory: 76 MB. Current time: 8/9/25, 9:26:33 PM IST
 // TclEventType: WAVEFORM_UPDATE_WAVEFORM
+// HMemoryUtils.trashcanNow. Engine heap size: 4,457 MB. GUI used memory: 78 MB. Current time: 8/9/25, 9:29:01 PM IST
+// TclEventType: WAVEFORM_UPDATE_WAVEFORM
+// Elapsed time: 151 seconds
+expandTree(RDIResource.WaveformNameTree_WAVEFORM_NAME_TREE, "[true, Systolic_array, pe_results[0:15][0:15][31:0], [15][0:15][31:0]]", 21); // k (RDIResource.WaveformNameTree_WAVEFORM_NAME_TREE)
+// TclEventType: WAVEFORM_SELECTED_WAVE_OBJECT_NAMES
+// TclEventType: WAVEFORM_UPDATE_WAVEFORM
+// TclEventType: WAVEFORM_UPDATE_COMMANDS
+// HMemoryUtils.trashcanNow. Engine heap size: 4,457 MB. GUI used memory: 73 MB. Current time: 8/9/25, 9:29:03 PM IST
+// TclEventType: WAVEFORM_UPDATE_WAVEFORM
+// TclEventType: WAVEFORM_SELECTED_WAVE_OBJECT_NAMES
+// TclEventType: WAVEFORM_UPDATE_WAVEFORM
+// HMemoryUtils.trashcanNow. Engine heap size: 4,457 MB. GUI used memory: 74 MB. Current time: 8/9/25, 9:29:03 PM IST
+// TclEventType: WAVEFORM_UPDATE_WAVEFORM

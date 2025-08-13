@@ -5,7 +5,7 @@ module gemma_accelerator #(
   parameter integer BUFFER_ADDR_WIDTH = $clog2(BUFFER_DEPTH),
   parameter integer SYSTOLIC_SIZE = 16,
   parameter integer DATA_WIDTH = 8,
-  parameter integer ACCUM_WIDTH = 20  // 20-bit to handle INT8×INT8 accumulation safely
+  parameter integer ACCUM_WIDTH = 32
 )(
   input  wire                  ap_clk,
   input  wire                  ap_rst_n,
@@ -77,21 +77,25 @@ module gemma_accelerator #(
     S_WAIT_WRITE_END   = 4'd8,  
     S_DONE             = 4'd9;
 
-  // AXI-Lite register offsets
-  localparam [5:0]
-    ADDR_CTRL     = 6'h00,
-    ADDR_STATUS   = 6'h04,
-    A_LSB         = 6'h10,
-    A_MSB         = 6'h14,
-    B_LSB         = 6'h18,
-    B_MSB         = 6'h1C,
-    C_LSB         = 6'h20,
-    C_MSB         = 6'h24;
+localparam [5:0]
+  // existing control/status + pointers
+  ADDR_CTRL   = 6'h00,  ADDR_STATUS = 6'h00,
+  A_LSB       = 6'h10,  A_MSB       = 6'h14,
+  B_LSB       = 6'h1C,  B_MSB       = 6'h20,
+  C_LSB       = 6'h28,  C_MSB       = 6'h2C,
+
+  // compact debug window (≤ 0x3C, 4‑byte aligned)
+  DBG_BUF_INDEX   = 6'h30,  // write: select which buffer line to peek
+  DBG_BUF_DATA_LS = 6'h34,  // read:  act_buf_rd_data[31:0]   (or a chosen slice)
+  DBG_BUF_DATA_MS = 6'h38,  // read:  act_buf_rd_data[63:32]
+  DBG_START       = 6'h3C;  // read:  {31'd0, start_pulse} (optional)
+
 
   reg [3:0]   current_state, next_state;
   reg [7:0]   beat_counter;
   reg [63:0]  addr_a_reg, addr_b_reg, addr_c_reg;
   reg         start_pulse;
+  reg         accelerator_done;  // FIXED: Add done signal
 
   // AXI-Lite write buffer
   reg         awvalid_seen, wvalid_seen;
@@ -120,14 +124,13 @@ module gemma_accelerator #(
   reg                           systolic_accum_reset;
   reg signed [DATA_WIDTH-1:0]   systolic_north_inputs [0:SYSTOLIC_SIZE-1];
   reg signed [DATA_WIDTH-1:0]   systolic_west_inputs [0:SYSTOLIC_SIZE-1];
-  // NEW: Valid signals for systolic array
   reg [SYSTOLIC_SIZE-1:0]       systolic_north_valid;
   reg [SYSTOLIC_SIZE-1:0]       systolic_west_valid;
   wire signed [SYSTOLIC_SIZE*SYSTOLIC_SIZE*ACCUM_WIDTH-1:0] systolic_results;
 
   // FIXED: Separate counters for proper timing control
-  reg [7:0]                     systolic_cycle_count;    // Overall cycle counter
-  reg [7:0]                     input_cycle_count;       // Input feeding cycle counter
+  reg [7:0]                     systolic_cycle_count;
+  reg [7:0]                     input_cycle_count;
   reg                           systolic_computing;
   reg                           matrices_loaded;
   reg                           activation_loaded;
@@ -135,10 +138,49 @@ module gemma_accelerator #(
 
   // Result management
   reg [ACCUM_WIDTH-1:0]         result_matrix [0:SYSTOLIC_SIZE-1][0:SYSTOLIC_SIZE-1];
-  reg [15:0]                    result_matrix_16bit [0:SYSTOLIC_SIZE-1][0:SYSTOLIC_SIZE-1];
-  reg [127:0]                   output_data_buffer [0:31];
+  reg [127:0]                   output_data_buffer [0:63];
   reg [4:0]                     output_buffer_idx;
   reg                           capture_results;
+
+  // Debug
+  reg [31:0] debug_buffer_index;
+
+// --- Write engine regs (new) ---
+reg        wvalid_reg, wlast_reg;
+reg [7:0]  wr_idx;
+reg [127:0] wdata_reg;
+reg [15:0]  wstrb_reg;
+
+  // derive word-aligned addresses (byte addr -> zero low 2 bits)
+wire [5:0] awaddr_word = {awaddr_latched[5:2], 2'b00};
+wire [5:0] araddr_word = {s_axi_control_araddr[5:2], 2'b00};
+
+  // Merge function to handle byte-wise writes
+  function [31:0] merge_by_wstrb;
+    input [31:0] oldw;
+    input [31:0] neww;
+    input [3:0]  wstrb;
+    begin
+      merge_by_wstrb = oldw;
+      if (wstrb[0]) merge_by_wstrb[ 7: 0] = neww[ 7: 0];
+      if (wstrb[1]) merge_by_wstrb[15: 8] = neww[15: 8];
+      if (wstrb[2]) merge_by_wstrb[23:16] = neww[23:16];
+      if (wstrb[3]) merge_by_wstrb[31:24] = neww[31:24];
+    end
+  endfunction
+wire state_enter_write_data = (current_state == S_WRITE_OUT_ADDR) && m_axi_gmem_awready;
+
+reg [7:0]   wbeats_sent;     // Debug counter for AXI write beats
+reg [7:0]   debug_wbeats_sent; // Snapshot for debug reading
+
+// Replace the existing write engine registers and logic:
+// Remove the old write engine regs (wvalid_reg, wlast_reg, wr_idx, wdata_reg, wstrb_reg)
+// Replace with this improved version:
+
+reg         write_active;
+reg [7:0]   write_beat_count;
+reg [127:0] write_data_reg;
+reg         write_last_reg;
 
   // Instantiate activation buffer (INT8, 128-bit width)
   accelerator_buffer #(
@@ -191,8 +233,8 @@ module gemma_accelerator #(
     .accum_reset(systolic_accum_reset),
     .north_inputs(systolic_north_packed),
     .west_inputs(systolic_west_packed),
-    .north_valid(systolic_north_valid),    // NEW
-    .west_valid(systolic_west_valid),      // NEW
+    .north_valid(systolic_north_valid),
+    .west_valid(systolic_west_valid),
     .result_matrix(systolic_results)
   );
 
@@ -209,6 +251,7 @@ module gemma_accelerator #(
       matrices_loaded <= 1'b0;
       activation_loaded <= 1'b0;
       weight_loaded <= 1'b0;
+      accelerator_done <= 1'b0;  // FIXED: Initialize done flag
     end else begin
       current_state <= next_state;
       
@@ -236,34 +279,37 @@ module gemma_accelerator #(
       // Both matrices loaded - give one extra cycle for stabilization
       matrices_loaded <= activation_loaded && weight_loaded;
 
-      // FIXED: Systolic computation control with proper timing
-      if (current_state == S_SYSTOLIC_COMPUTE) begin
-        systolic_cycle_count <= systolic_cycle_count + 1'b1;
-        
-        // Only start feeding inputs when matrices are confirmed loaded
-        if (matrices_loaded) begin
-          systolic_computing <= 1'b1;
-          input_cycle_count <= input_cycle_count + 1'b1;
-          
-          // Start capturing results after pipeline fills + computation completes
-          // 16 input cycles + 15 propagation cycles = 31 total minimum
-          if (systolic_cycle_count >= 8'd32) begin
-            capture_results <= 1'b1;
-          end
-        end else begin
-          systolic_computing <= 1'b0;
-          input_cycle_count <= 8'd0;
-        end
-      end else begin
-        systolic_computing <= 1'b0;
-        systolic_cycle_count <= 8'd0;
-        input_cycle_count <= 8'd0;
-        capture_results <= 1'b0;
-      end
+      // FIXED: Done flag management
+      if (current_state == S_DONE)
+        accelerator_done <= 1'b1;
+      else if (start_pulse)  // Clear done when starting new computation
+        accelerator_done <= 1'b0;
+
+if (current_state == S_SYSTOLIC_COMPUTE) begin
+  systolic_cycle_count <= systolic_cycle_count + 1'b1;
+
+  if (matrices_loaded) begin
+    systolic_computing <= 1'b1;
+    input_cycle_count  <= input_cycle_count + 1'b1;
+
+    // give the systolic pipeline a bit more time before capture
+    if (systolic_cycle_count >= 8'd35) begin
+      capture_results <= 1'b1;
+    end
+  end else begin
+    systolic_computing <= 1'b0;
+    input_cycle_count  <= 8'd0;
+  end
+end else begin
+  systolic_computing     <= 1'b0;
+  systolic_cycle_count   <= 8'd0;
+  input_cycle_count      <= 8'd0;
+  capture_results        <= 1'b0;
+end
 
       // Output buffer management
       if (current_state == S_WRITE_OUT_DATA && m_axi_gmem_wvalid && m_axi_gmem_wready) begin
-        if (output_buffer_idx < 5'd31)
+        if (output_buffer_idx < 5'd63)
           output_buffer_idx <= output_buffer_idx + 1'b1;
       end else if (current_state == S_IDLE) begin
         output_buffer_idx <= 5'd0;
@@ -271,11 +317,10 @@ module gemma_accelerator #(
     end
   end
 
-  // Matrix unpacking from buffers - same as before but with additional delay
+  // Matrix unpacking from buffers
   integer unpack_i, unpack_j;
   always @(posedge ap_clk) begin
     if (!ap_rst_n) begin
-      // Initialize matrices
       for (unpack_i = 0; unpack_i < SYSTOLIC_SIZE; unpack_i = unpack_i + 1) begin
         for (unpack_j = 0; unpack_j < SYSTOLIC_SIZE; unpack_j = unpack_j + 1) begin
           activation_matrix[unpack_i][unpack_j] <= 8'd0;
@@ -331,17 +376,14 @@ module gemma_accelerator #(
       act_buf_wr_en         <= 1'b0;
       act_buf_wr_addr       <= {BUFFER_ADDR_WIDTH{1'b0}};
       act_buf_wr_data       <= 128'd0;
-      act_buf_rd_addr       <= {BUFFER_ADDR_WIDTH{1'b0}};
       wgt_buf_wr_en         <= 1'b0;
       wgt_buf_wr_addr       <= {BUFFER_ADDR_WIDTH{1'b0}};
       wgt_buf_wr_data       <= 128'd0;
       wgt_buf_rd_addr       <= {BUFFER_ADDR_WIDTH{1'b0}};
-      systolic_accum_reset  <= 1'b0;
     end else begin
       // Default values
       act_buf_wr_en         <= 1'b0;
       wgt_buf_wr_en         <= 1'b0;
-      systolic_accum_reset  <= 1'b0;
 
       // Load activation data
       if (current_state == S_FETCH_ACT_DATA && m_axi_gmem_rvalid && m_axi_gmem_rready) begin
@@ -356,36 +398,24 @@ module gemma_accelerator #(
         wgt_buf_wr_addr <= beat_counter[BUFFER_ADDR_WIDTH-1:0];
         wgt_buf_wr_data <= m_axi_gmem_rdata;
       end
-
-      // Systolic computation with proper reset timing
-      if (current_state == S_SYSTOLIC_COMPUTE && matrices_loaded) begin
-        // Reset accumulator only once at the very start
-        if (input_cycle_count == 8'd0) begin
-          systolic_accum_reset <= 1'b1;
-        end
-      end
     end
   end
 
-
-  // ------------------------------------------------------------------
-// synchronous clear of all PE accumulators at the start of SYSTOLIC
-// ------------------------------------------------------------------
-always @(posedge ap_clk) begin
-  if (!ap_rst_n) begin
-    systolic_accum_reset <= 1'b1;
-  end else begin
-    // on exactly the first cycle of the compute state, hold reset high
-    if (current_state == S_SYSTOLIC_COMPUTE && systolic_cycle_count == 8'd0)
+  // Synchronous clear of all PE accumulators at the start of SYSTOLIC
+  always @(posedge ap_clk) begin
+    if (!ap_rst_n) begin
       systolic_accum_reset <= 1'b1;
-    else
-      systolic_accum_reset <= 1'b0;
+    end else begin
+      if (current_state == S_SYSTOLIC_COMPUTE && systolic_cycle_count == 8'd0)
+        systolic_accum_reset <= 1'b1;
+      else
+        systolic_accum_reset <= 1'b0;
+    end
   end
-end
-
 
   // FIXED: Systolic array input generation with VALID SIGNAL CONTROL
   integer skew_i;
+  integer buf_idx;
   always @(posedge ap_clk) begin
     if (!ap_rst_n) begin
       for (skew_i = 0; skew_i < SYSTOLIC_SIZE; skew_i = skew_i + 1) begin
@@ -395,31 +425,20 @@ end
       systolic_north_valid <= {SYSTOLIC_SIZE{1'b0}};
       systolic_west_valid <= {SYSTOLIC_SIZE{1'b0}};
     end else if (current_state == S_SYSTOLIC_COMPUTE && matrices_loaded && systolic_computing) begin
-      // CRITICAL FIX: Use input_cycle_count for clean indexing starting from 0
       for (skew_i = 0; skew_i < SYSTOLIC_SIZE; skew_i = skew_i + 1) begin
-        // Check if we should feed data to this PE at this cycle
         if (input_cycle_count >= (skew_i + 1) && (input_cycle_count - skew_i - 1) < SYSTOLIC_SIZE) begin
-          // North inputs (weights): weights flow from north to south
-          // PE[row][col] gets weight_matrix[input_idx][col] where input_idx advances each cycle
           systolic_north_inputs[skew_i] <= weight_matrix[input_cycle_count - skew_i - 1][skew_i];
-          
-          // West inputs (activations): activations flow from west to east  
-          // PE[row][col] gets activation_matrix[row][input_idx] where input_idx advances each cycle
           systolic_west_inputs[skew_i] <= activation_matrix[skew_i][input_cycle_count - skew_i - 1];
-          
-          // NEW: Set valid signals when feeding actual data
           systolic_north_valid[skew_i] <= 1'b1;
           systolic_west_valid[skew_i] <= 1'b1;
         end else begin
           systolic_north_inputs[skew_i] <= 8'd0;
           systolic_west_inputs[skew_i] <= 8'd0;
-          // NEW: Clear valid signals when not feeding actual data
           systolic_north_valid[skew_i] <= 1'b0;
           systolic_west_valid[skew_i] <= 1'b0;
         end
       end
     end else begin
-      // Clear inputs and valid signals when not computing
       for (skew_i = 0; skew_i < SYSTOLIC_SIZE; skew_i = skew_i + 1) begin
         systolic_north_inputs[skew_i] <= 8'd0;
         systolic_west_inputs[skew_i] <= 8'd0;
@@ -429,115 +448,179 @@ end
     end
   end
 
+  // // Result capture and output buffer preparation
+  // integer i, j;
+  // always @(posedge ap_clk) begin
+  //   if (!ap_rst_n) begin
+  //     for (i = 0; i < SYSTOLIC_SIZE; i = i + 1) begin
+  //       for (j = 0; j < SYSTOLIC_SIZE; j = j + 1) begin
+  //         result_matrix[i][j] <= {ACCUM_WIDTH{1'b0}};
+  //       end
+  //     end
+  //     for (i = 0; i < 64; i = i + 1) begin
+  //       output_data_buffer[i] <= 128'd0;
+  //     end
+  //   end else begin
+  //     // Capture results when computation is complete
+  //     if (capture_results && systolic_cycle_count == 8'd49) begin
+  //       for (i = 0; i < SYSTOLIC_SIZE; i = i + 1) begin
+  //         for (j = 0; j < SYSTOLIC_SIZE; j = j + 1) begin
+  //           result_matrix[i][j] <= systolic_results[(i*SYSTOLIC_SIZE + j + 1)*ACCUM_WIDTH - 1 -: ACCUM_WIDTH];
+  //         end
+  //       end
+  //     end
+
+  //     // Prepare output data buffer - pack 4×32-bit values per 128-bit word
+  //     if (current_state == S_SYSTOLIC_COMPUTE && systolic_cycle_count == 8'd50) begin
+  //       for (i = 0; i < SYSTOLIC_SIZE; i = i + 1) begin
+  //         for (j = 0; j < SYSTOLIC_SIZE; j = j + 4) begin
+  //           buf_idx = i * 4 + j/4;
+  //           output_data_buffer[buf_idx] <= {
+  //             result_matrix[i][j+3],
+  //             result_matrix[i][j+2],
+  //             result_matrix[i][j+1],
+  //             result_matrix[i][j+0]
+  //           };
+  //         end
+  //       end
+  //     end
+  //   end
+  // end
+
   // Result capture and output buffer preparation
-  integer i, j;
-  always @(posedge ap_clk) begin
-    if (!ap_rst_n) begin
-      // Initialize result matrix
+integer i, j, buf_idx;
+always @(posedge ap_clk) begin
+  if (!ap_rst_n) begin
+    for (i = 0; i < SYSTOLIC_SIZE; i = i + 1) begin
+      for (j = 0; j < SYSTOLIC_SIZE; j = j + 1) begin
+        result_matrix[i][j] <= {ACCUM_WIDTH{1'b0}};
+      end
+    end
+    for (i = 0; i < 64; i = i + 1) begin
+      output_data_buffer[i] <= 128'd0;
+    end
+  end else begin
+    // 1) CAPTURE: wait an extra couple of cycles for pipeline to settle
+    if (capture_results && systolic_cycle_count == 8'd54) begin
       for (i = 0; i < SYSTOLIC_SIZE; i = i + 1) begin
         for (j = 0; j < SYSTOLIC_SIZE; j = j + 1) begin
-          result_matrix[i][j] <= {ACCUM_WIDTH{1'b0}};
-          result_matrix_16bit[i][j] <= 16'd0;
+          // keep your original +1 slice convention
+          result_matrix[i][j] <= systolic_results[(i*SYSTOLIC_SIZE + j + 1)*ACCUM_WIDTH - 1 -: ACCUM_WIDTH];
         end
       end
-      // Initialize output buffer
-      for (i = 0; i < 32; i = i + 1) begin
-        output_data_buffer[i] <= 128'd0;
-      end
-    end else begin
-      // Capture results when computation is complete
-      if (capture_results && systolic_cycle_count == 8'd34) begin
-        for (i = 0; i < SYSTOLIC_SIZE; i = i + 1) begin
-          for (j = 0; j < SYSTOLIC_SIZE; j = j + 1) begin
-            // Extract the 20-bit result for position [i][j]
-            result_matrix[i][j] <= systolic_results[(i*SYSTOLIC_SIZE + j + 1)*ACCUM_WIDTH - 1 -: ACCUM_WIDTH];
-            
-            // Truncate/saturate 20-bit result to 16-bit
-            if ($signed(result_matrix[i][j]) > $signed(20'd32767))
-              result_matrix_16bit[i][j] <= 16'd32767;
-            else if ($signed(result_matrix[i][j]) < $signed(-20'd32768))
-              result_matrix_16bit[i][j] <= -16'd32768;
-            else
-              result_matrix_16bit[i][j] <= result_matrix[i][j][15:0];
-          end
-        end
-      end
-      
-      // Prepare output data buffer
-      if (current_state == S_SYSTOLIC_COMPUTE && systolic_cycle_count == 8'd35) begin
-        for (i = 0; i < SYSTOLIC_SIZE; i = i + 1) begin
-          // Pack 8×16-bit results per 128-bit word
-          output_data_buffer[i*2] <= {
-            result_matrix_16bit[i][7], result_matrix_16bit[i][6], 
-            result_matrix_16bit[i][5], result_matrix_16bit[i][4],
-            result_matrix_16bit[i][3], result_matrix_16bit[i][2], 
-            result_matrix_16bit[i][1], result_matrix_16bit[i][0]
-          };
-          output_data_buffer[i*2 + 1] <= {
-            result_matrix_16bit[i][15], result_matrix_16bit[i][14], 
-            result_matrix_16bit[i][13], result_matrix_16bit[i][12],
-            result_matrix_16bit[i][11], result_matrix_16bit[i][10], 
-            result_matrix_16bit[i][9],  result_matrix_16bit[i][8]
+    end
+
+    // 2) PACK: do packing one cycle *after* capture
+    if (capture_results && systolic_cycle_count == 8'd55) begin
+      // pack 4×32-bit per 128-bit, row by row, big-endian within the word
+      for (i = 0; i < SYSTOLIC_SIZE; i = i + 1) begin
+        for (j = 0; j < SYSTOLIC_SIZE; j = j + 4) begin
+          buf_idx = i * 4 + j/4;
+          output_data_buffer[buf_idx] <= {
+            result_matrix[i][j+3],
+            result_matrix[i][j+2],
+            result_matrix[i][j+1],
+            result_matrix[i][j+0]
           };
         end
       end
     end
   end
+end
 
-  // AXI-Lite interface - same as before
+  // AXI-Lite interface
   assign s_axi_control_awready = (current_state == S_IDLE);
   assign s_axi_control_wready  = (current_state == S_IDLE);
-  assign s_axi_control_arready = (current_state == S_IDLE) || (s_axi_control_araddr == ADDR_STATUS);
+  // assign s_axi_control_arready = (current_state == S_IDLE) || (s_axi_control_araddr == ADDR_STATUS);
+  assign s_axi_control_arready = 1'b1;
+
   assign s_axi_control_bresp   = 2'b00;
   assign s_axi_control_rresp   = 2'b00;
   assign s_axi_control_bid     = s_axi_control_awid;
   assign s_axi_control_rid     = s_axi_control_arid;
 
-  // AXI-Lite write logic
+  // FIXED: AXI-Lite write logic with proper register mapping
+  reg [3:0] wstrb_latched;
+
+  
+
   always @(posedge ap_clk) begin
-    if (!ap_rst_n) begin
+  if (!ap_rst_n) begin
+    s_axi_control_bvalid <= 1'b0;
+    start_pulse          <= 1'b0;
+    awvalid_seen         <= 1'b0;
+    wvalid_seen          <= 1'b0;
+    addr_a_reg           <= 64'd0;
+    addr_b_reg           <= 64'd0;
+    addr_c_reg           <= 64'd0;
+    debug_buffer_index   <= 32'd0;
+    wstrb_latched        <= 4'b0000;
+  end else begin
+    // one-shot start pulse
+    if (start_pulse) start_pulse <= 1'b0;
+
+    // complete write response
+    if (s_axi_control_bvalid && s_axi_control_bready)
       s_axi_control_bvalid <= 1'b0;
-      start_pulse          <= 1'b0;
+
+    // capture AW
+    if (s_axi_control_awvalid && s_axi_control_awready) begin
+      awaddr_latched <= s_axi_control_awaddr;
+      awvalid_seen   <= 1'b1;
+    end
+
+    // capture W
+    if (s_axi_control_wvalid && s_axi_control_wready) begin
+      wdata_latched  <= s_axi_control_wdata;
+      wstrb_latched  <= s_axi_control_wstrb;   // latch strobes with data
+      wvalid_seen    <= 1'b1;
+    end
+
+    // commit when both seen
+    if (awvalid_seen && wvalid_seen) begin
       awvalid_seen         <= 1'b0;
       wvalid_seen          <= 1'b0;
-      addr_a_reg           <= 64'd0;
-      addr_b_reg           <= 64'd0;
-      addr_c_reg           <= 64'd0;
+      s_axi_control_bvalid <= 1'b1;
+
+      // robust START: trigger if any written byte's LSB is 1
+      if (awaddr_word == ADDR_CTRL) begin
+        if ( (wstrb_latched[0] && wdata_latched[0])  ||
+             (wstrb_latched[1] && wdata_latched[8])  ||
+             (wstrb_latched[2] && wdata_latched[16]) ||
+             (wstrb_latched[3] && wdata_latched[24]) )
+          start_pulse <= 1'b1;
+      end
+
+      // register writes with byte-merge
+      case (awaddr_word)
+        A_LSB:          addr_a_reg[31:0]   <= merge_by_wstrb(addr_a_reg[31:0],   wdata_latched, wstrb_latched);
+        A_MSB:          addr_a_reg[63:32]  <= merge_by_wstrb(addr_a_reg[63:32],  wdata_latched, wstrb_latched);
+        B_LSB:          addr_b_reg[31:0]   <= merge_by_wstrb(addr_b_reg[31:0],   wdata_latched, wstrb_latched);
+        B_MSB:          addr_b_reg[63:32]  <= merge_by_wstrb(addr_b_reg[63:32],  wdata_latched, wstrb_latched);
+        C_LSB:          addr_c_reg[31:0]   <= merge_by_wstrb(addr_c_reg[31:0],   wdata_latched, wstrb_latched);
+        C_MSB:          addr_c_reg[63:32]  <= merge_by_wstrb(addr_c_reg[63:32],  wdata_latched, wstrb_latched);
+        DBG_BUF_INDEX:  debug_buffer_index <= merge_by_wstrb(debug_buffer_index, wdata_latched, wstrb_latched);
+        default: ;
+      endcase
+    end
+  end
+end
+
+
+
+
+  // Add buffer read address control for debug access
+  always @(posedge ap_clk) begin
+    if (!ap_rst_n) begin
+      act_buf_rd_addr <= {BUFFER_ADDR_WIDTH{1'b0}};
     end else begin
-      if (start_pulse)
-        start_pulse <= 1'b0;
-
-      if (s_axi_control_bvalid && s_axi_control_bready)
-        s_axi_control_bvalid <= 1'b0;
-
-      if (s_axi_control_awvalid && s_axi_control_awready) begin
-        awaddr_latched <= s_axi_control_awaddr;
-        awvalid_seen   <= 1'b1;
-      end
-
-      if (s_axi_control_wvalid && s_axi_control_wready) begin
-        wdata_latched <= s_axi_control_wdata;
-        wvalid_seen   <= 1'b1;
-      end
-
-      if (awvalid_seen && wvalid_seen) begin
-        awvalid_seen <= 1'b0;
-        wvalid_seen  <= 1'b0;
-        s_axi_control_bvalid <= 1'b1;
-        case (awaddr_latched)
-          ADDR_CTRL:  start_pulse          <= wdata_latched[0];
-          A_LSB:      addr_a_reg[31:0]     <= wdata_latched;
-          A_MSB:      addr_a_reg[63:32]    <= wdata_latched;
-          B_LSB:      addr_b_reg[31:0]     <= wdata_latched;
-          B_MSB:      addr_b_reg[63:32]    <= wdata_latched;
-          C_LSB:      addr_c_reg[31:0]     <= wdata_latched;
-          C_MSB:      addr_c_reg[63:32]    <= wdata_latched;
-        endcase
-      end
+      act_buf_rd_addr <= debug_buffer_index[BUFFER_ADDR_WIDTH-1:0];
     end
   end
 
-  // AXI-Lite read logic
+
+
+  // FIXED: AXI-Lite read logic with proper status reporting
   always @(posedge ap_clk) begin
     if (!ap_rst_n) begin
       s_axi_control_rvalid <= 1'b0;
@@ -547,15 +630,93 @@ end
         s_axi_control_rvalid <= 1'b0;
       end else if (s_axi_control_arvalid && s_axi_control_arready) begin
         s_axi_control_rvalid <= 1'b1;
-        case (s_axi_control_araddr)
-          ADDR_STATUS:   s_axi_control_rdata <= {30'd0, (current_state != S_IDLE), (current_state == S_DONE)};
-          default:       s_axi_control_rdata <= 32'hDEADBEEF;
+      
+
+        // assume araddr_word = {s_axi_control_araddr[5:2],2'b00}
+        case (araddr_word)
+          // status: bit0=done, bit1=busy
+          ADDR_STATUS:      s_axi_control_rdata <= {30'd0, (current_state != S_IDLE), accelerator_done};
+
+          // existing pointers (great for readback debugging)
+          A_LSB:            s_axi_control_rdata <= addr_a_reg[31:0];
+          A_MSB:            s_axi_control_rdata <= addr_a_reg[63:32];
+          B_LSB:            s_axi_control_rdata <= addr_b_reg[31:0];
+          B_MSB:            s_axi_control_rdata <= addr_b_reg[63:32];
+          C_LSB:            s_axi_control_rdata <= addr_c_reg[31:0];
+          C_MSB:            s_axi_control_rdata <= addr_c_reg[63:32];
+          // AXI-Lite read map (add/replace a case)
+          6'h3C:            s_axi_control_rdata <= {24'd0, debug_wbeats_sent};  // expect 64 when done
+
+
+          // tiny buffer peek window
+          DBG_BUF_INDEX:    s_axi_control_rdata <= debug_buffer_index;
+          DBG_BUF_DATA_LS:  s_axi_control_rdata <= (debug_buffer_index < BUFFER_DEPTH) ? act_buf_rd_data[31:0]  : 32'hDEADBEEF;
+          DBG_BUF_DATA_MS:  s_axi_control_rdata <= (debug_buffer_index < BUFFER_DEPTH) ? act_buf_rd_data[63:32] : 32'hDEADBEEF;
+          DBG_START:        s_axi_control_rdata <= {31'd0, start_pulse};
+
+          default:          s_axi_control_rdata <= 32'hDEADBEEF;
         endcase
+
       end
     end
   end
+  
+  
+// Replace the entire write engine always block with this:
+always @(posedge ap_clk) begin
+  if (!ap_rst_n) begin
+    write_active      <= 1'b0;
+    write_beat_count  <= 8'd0;
+    write_data_reg    <= 128'd0;
+    write_last_reg    <= 1'b0;
+    wbeats_sent       <= 8'd0;
+    debug_wbeats_sent <= 8'd0;
+  end else begin
+    case (current_state)
+      // Initialize write engine after AW handshake
+      S_WRITE_OUT_ADDR: begin
+        if (m_axi_gmem_awready) begin
+          write_active     <= 1'b1;
+          write_beat_count <= 8'd0;
+          write_data_reg   <= output_data_buffer[8'd0];
+          write_last_reg   <= 1'b0;
+          wbeats_sent      <= 8'd0;
+        end
+      end
 
-  // FIXED: FSM and AXI Master interface with corrected timing
+      // Drive W channel - only advance on WREADY handshakes
+      S_WRITE_OUT_DATA: begin
+        if (write_active && m_axi_gmem_wready) begin
+          wbeats_sent <= wbeats_sent + 1'b1;
+          
+          if (write_beat_count == 8'd63) begin
+            // This cycle completes the last beat
+            write_active     <= 1'b0;
+            write_last_reg   <= 1'b0;
+            debug_wbeats_sent <= wbeats_sent + 1'b1; // Capture final count
+          end else begin
+            // Advance to next beat
+            write_beat_count <= write_beat_count + 1'b1;
+            write_data_reg   <= output_data_buffer[write_beat_count + 1'b1];
+            write_last_reg   <= (write_beat_count + 1'b1 == 8'd63);
+          end
+        end
+      end
+
+      // Clear debug counter when starting new operation
+      S_IDLE: begin
+        if (start_pulse) begin
+          wbeats_sent       <= 8'd0;
+          debug_wbeats_sent <= 8'd0;
+        end
+      end
+
+      default: ; // no change
+    endcase
+  end
+end
+
+  // FIXED: FSM and AXI Master interface
   always @(*) begin
     next_state          = current_state;
     m_axi_gmem_awid     = {ID_WIDTH{1'b0}};
@@ -571,10 +732,10 @@ end
     m_axi_gmem_araddr   = 64'd0;
     m_axi_gmem_arlen    = 8'd0;
     m_axi_gmem_wdata    = 128'h0;
-    m_axi_gmem_awsize   = 3'b100;
-    m_axi_gmem_awburst  = 2'b01;
-    m_axi_gmem_arsize   = 3'b100;
-    m_axi_gmem_arburst  = 2'b01;
+    m_axi_gmem_awsize   = 3'b100;  // 128-bit transfers
+    m_axi_gmem_awburst  = 2'b01;   // INCR burst
+    m_axi_gmem_arsize   = 3'b100;  // 128-bit transfers
+    m_axi_gmem_arburst  = 2'b01;   // INCR burst
     m_axi_gmem_wstrb    = 16'hFFFF;
 
     case (current_state)
@@ -608,23 +769,22 @@ end
       end
 
       S_SYSTOLIC_COMPUTE: begin
-        // FIXED: Wait for sufficient cycles for complete computation
-        // 16 input cycles + 15 propagation cycles + margin = 36 cycles total
-        if (systolic_cycle_count >= 8'd36)
+        if (systolic_cycle_count >= 8'd56)
           next_state = S_WRITE_OUT_ADDR;
       end
 
       S_WRITE_OUT_ADDR: begin
         m_axi_gmem_awvalid = 1'b1;
         m_axi_gmem_awaddr  = addr_c_reg;
-        m_axi_gmem_awlen   = 8'd31; // 32 beats for 16x16 INT16 result matrix
+        m_axi_gmem_awlen   = 8'd63; // 64 beats for 16x16 matrix of 32-bit values
         if (m_axi_gmem_awready) next_state = S_WRITE_OUT_DATA;
       end
 
       S_WRITE_OUT_DATA: begin
-        m_axi_gmem_wvalid = 1'b1;
-        m_axi_gmem_wdata  = output_data_buffer[output_buffer_idx];
-        m_axi_gmem_wlast  = (beat_counter == 8'd31); // Last beat of 32-beat burst
+        m_axi_gmem_wvalid = write_active;
+        m_axi_gmem_wdata  = write_data_reg;
+        m_axi_gmem_wstrb  = 16'hFFFF;
+        m_axi_gmem_wlast  = write_last_reg;
         if (m_axi_gmem_wvalid && m_axi_gmem_wready && m_axi_gmem_wlast) 
           next_state = S_WAIT_WRITE_END;
       end
