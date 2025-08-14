@@ -12,7 +12,7 @@ module gemma_accelerator #(
   // AXI-Lite Control Interface
   input  wire                  s_axi_control_awvalid,
   output wire                  s_axi_control_awready,
-  input  wire [5:0]            s_axi_control_awaddr,
+  input  wire [7:0]            s_axi_control_awaddr,
   input  wire                  s_axi_control_wvalid,
   output wire                  s_axi_control_wready,
   input  wire [31:0]           s_axi_control_wdata,
@@ -24,7 +24,7 @@ module gemma_accelerator #(
   output wire [0:0]            s_axi_control_bid,
   input  wire                  s_axi_control_arvalid,
   output wire                  s_axi_control_arready,
-  input  wire [5:0]            s_axi_control_araddr,
+  input  wire [7:0]            s_axi_control_araddr,
   output reg                   s_axi_control_rvalid,
   input  wire                  s_axi_control_rready,
   output reg  [31:0]           s_axi_control_rdata,
@@ -74,21 +74,26 @@ module gemma_accelerator #(
     S_SYSTOLIC_COMPUTE = 4'd5,
     S_WRITE_OUT_ADDR   = 4'd6,
     S_WRITE_OUT_DATA   = 4'd7,
-    S_WAIT_WRITE_END   = 4'd8,  
+    S_WAIT_WRITE_END   = 4'd8,
     S_DONE             = 4'd9;
 
-localparam [5:0]
+localparam [7:0]
   // existing control/status + pointers
-  ADDR_CTRL   = 6'h00,  ADDR_STATUS = 6'h00,
-  A_LSB       = 6'h10,  A_MSB       = 6'h14,
-  B_LSB       = 6'h1C,  B_MSB       = 6'h20,
-  C_LSB       = 6'h28,  C_MSB       = 6'h2C,
+  ADDR_CTRL   = 8'h00,  ADDR_STATUS = 8'h00,
+  A_LSB       = 8'h10,  A_MSB       = 8'h14,
+  B_LSB       = 8'h1C,  B_MSB       = 8'h20,
+  C_LSB       = 8'h28,  C_MSB       = 8'h2C,
 
-  // compact debug window (≤ 0x3C, 4‑byte aligned)
-  DBG_BUF_INDEX   = 6'h30,  // write: select which buffer line to peek
-  DBG_BUF_DATA_LS = 6'h34,  // read:  act_buf_rd_data[31:0]   (or a chosen slice)
-  DBG_BUF_DATA_MS = 6'h38,  // read:  act_buf_rd_data[63:32]
-  DBG_START       = 6'h3C;  // read:  {31'd0, start_pulse} (optional)
+  // compact debug window
+  DBG_BUF_INDEX   = 8'h30,  // write: select which buffer line to peek
+  DBG_BUF_DATA_LS = 8'h34,  // read:  act_buf_rd_data[31:0]   (or a chosen slice)
+  DBG_BUF_DATA_MS = 8'h38,  // read:  act_buf_rd_data[63:32]
+  DBG_AXI_RDATA0  = 8'h3C,  // read:  debug_last_rdata[31:0]
+  DBG_AXI_RDATA1  = 8'h40,  // read:  debug_last_rdata[63:32]
+  DBG_AXI_RDATA2  = 8'h44,  // read:  debug_last_rdata[95:64]
+  DBG_AXI_RDATA3  = 8'h48,  // read:  debug_last_rdata[127:96]
+  DBG_AXI_ADDR    = 8'h4C,  // read:  debug_last_addr
+  DBG_AXI_BEAT    = 8'h50;  // read:  {24'd0, debug_beat_count}
 
 
   reg [3:0]   current_state, next_state;
@@ -99,7 +104,7 @@ localparam [5:0]
 
   // AXI-Lite write buffer
   reg         awvalid_seen, wvalid_seen;
-  reg [5:0]   awaddr_latched;
+  reg [7:0]   awaddr_latched;
   reg [31:0]  wdata_latched;
 
   // Buffer control signals for activation buffer (INT8, 128-bit width = 16 values)
@@ -142,6 +147,11 @@ localparam [5:0]
   reg [4:0]                     output_buffer_idx;
   reg                           capture_results;
 
+  // Debug registers for AXI transaction analysis
+  reg [127:0] debug_last_rdata;
+  reg [7:0]   debug_beat_count;
+  reg [31:0]  debug_last_addr;
+
   // Debug
   reg [31:0] debug_buffer_index;
 
@@ -152,8 +162,8 @@ reg [127:0] wdata_reg;
 reg [15:0]  wstrb_reg;
 
   // derive word-aligned addresses (byte addr -> zero low 2 bits)
-wire [5:0] awaddr_word = {awaddr_latched[5:2], 2'b00};
-wire [5:0] araddr_word = {s_axi_control_araddr[5:2], 2'b00};
+wire [7:0] awaddr_word = {awaddr_latched[7:2], 2'b00};
+wire [7:0] araddr_word = {s_axi_control_araddr[7:2], 2'b00};
 
   // Merge function to handle byte-wise writes
   function [31:0] merge_by_wstrb;
@@ -252,6 +262,11 @@ reg         write_last_reg;
       activation_loaded <= 1'b0;
       weight_loaded <= 1'b0;
       accelerator_done <= 1'b0;  // FIXED: Initialize done flag
+      
+      // Initialize debug registers
+      debug_last_rdata <= 128'd0;
+      debug_beat_count <= 8'd0;
+      debug_last_addr <= 32'd0;
     end else begin
       current_state <= next_state;
       
@@ -330,6 +345,11 @@ end
     end else begin
       // Unpack activation matrix when loading completes
       if (current_state == S_FETCH_ACT_DATA && m_axi_gmem_rvalid && m_axi_gmem_rready) begin
+        // Debug: Capture last AXI transaction details
+        debug_last_rdata <= m_axi_gmem_rdata;
+        debug_beat_count <= beat_counter;
+        debug_last_addr <= addr_a_reg + (beat_counter << 4); // beat_counter * 16 bytes
+        
         activation_matrix[beat_counter][0]  <= $signed(m_axi_gmem_rdata[7:0]);
         activation_matrix[beat_counter][1]  <= $signed(m_axi_gmem_rdata[15:8]);
         activation_matrix[beat_counter][2]  <= $signed(m_axi_gmem_rdata[23:16]);
@@ -501,7 +521,7 @@ always @(posedge ap_clk) begin
     end
   end else begin
     // 1) CAPTURE: wait an extra couple of cycles for pipeline to settle
-    if (capture_results && systolic_cycle_count == 8'd54) begin
+    if (capture_results && systolic_cycle_count == 8'd60) begin
       for (i = 0; i < SYSTOLIC_SIZE; i = i + 1) begin
         for (j = 0; j < SYSTOLIC_SIZE; j = j + 1) begin
           // keep your original +1 slice convention
@@ -511,7 +531,7 @@ always @(posedge ap_clk) begin
     end
 
     // 2) PACK: do packing one cycle *after* capture
-    if (capture_results && systolic_cycle_count == 8'd55) begin
+    if (capture_results && systolic_cycle_count == 8'd65) begin
       // pack 4×32-bit per 128-bit, row by row, big-endian within the word
       for (i = 0; i < SYSTOLIC_SIZE; i = i + 1) begin
         for (j = 0; j < SYSTOLIC_SIZE; j = j + 4) begin
@@ -608,6 +628,23 @@ end
 
 
 
+reg packed_ready;
+
+always @(posedge ap_clk) begin
+  if (!ap_rst_n) begin
+    packed_ready <= 1'b0;
+  end else begin
+    if (current_state == S_SYSTOLIC_COMPUTE) begin
+      // raise when packing is done
+      if (capture_results && systolic_cycle_count == 8'd65)
+        packed_ready <= 1'b1;
+    end else if (current_state == S_IDLE && start_pulse) begin
+      // clear for next op
+      packed_ready <= 1'b0;
+    end
+  end
+end
+
 
   // Add buffer read address control for debug access
   always @(posedge ap_clk) begin
@@ -617,6 +654,17 @@ end
       act_buf_rd_addr <= debug_buffer_index[BUFFER_ADDR_WIDTH-1:0];
     end
   end
+
+reg [127:0] write_staging_buffer [0:63];
+
+integer k;
+always @(posedge ap_clk) begin
+  if (!ap_rst_n) begin
+    for (k=0;k<64;k=k+1) write_staging_buffer[k] <= 128'd0;
+  end else if (current_state == S_SYSTOLIC_COMPUTE && packed_ready && systolic_cycle_count == 8'd66) begin
+    for (k=0;k<64;k=k+1) write_staging_buffer[k] <= output_data_buffer[k];
+  end
+end
 
 
 
@@ -644,15 +692,19 @@ end
           B_MSB:            s_axi_control_rdata <= addr_b_reg[63:32];
           C_LSB:            s_axi_control_rdata <= addr_c_reg[31:0];
           C_MSB:            s_axi_control_rdata <= addr_c_reg[63:32];
-          // AXI-Lite read map (add/replace a case)
-          6'h3C:            s_axi_control_rdata <= {24'd0, debug_wbeats_sent};  // expect 64 when done
-
 
           // tiny buffer peek window
           DBG_BUF_INDEX:    s_axi_control_rdata <= debug_buffer_index;
           DBG_BUF_DATA_LS:  s_axi_control_rdata <= (debug_buffer_index < BUFFER_DEPTH) ? act_buf_rd_data[31:0]  : 32'hDEADBEEF;
           DBG_BUF_DATA_MS:  s_axi_control_rdata <= (debug_buffer_index < BUFFER_DEPTH) ? act_buf_rd_data[63:32] : 32'hDEADBEEF;
-          DBG_START:        s_axi_control_rdata <= {31'd0, start_pulse};
+          
+          // AXI transaction debug registers
+          DBG_AXI_RDATA0:   s_axi_control_rdata <= debug_last_rdata[31:0];
+          DBG_AXI_RDATA1:   s_axi_control_rdata <= debug_last_rdata[63:32];
+          DBG_AXI_RDATA2:   s_axi_control_rdata <= debug_last_rdata[95:64];
+          DBG_AXI_RDATA3:   s_axi_control_rdata <= debug_last_rdata[127:96];
+          DBG_AXI_ADDR:     s_axi_control_rdata <= debug_last_addr;
+          DBG_AXI_BEAT:     s_axi_control_rdata <= {24'd0, debug_beat_count};
 
           default:          s_axi_control_rdata <= 32'hDEADBEEF;
         endcase
@@ -663,6 +715,59 @@ end
   
   
 // Replace the entire write engine always block with this:
+// always @(posedge ap_clk) begin
+//   if (!ap_rst_n) begin
+//     write_active      <= 1'b0;
+//     write_beat_count  <= 8'd0;
+//     write_data_reg    <= 128'd0;
+//     write_last_reg    <= 1'b0;
+//     wbeats_sent       <= 8'd0;
+//     debug_wbeats_sent <= 8'd0;
+//   end else begin
+//     case (current_state)
+//       // Initialize write engine after AW handshake
+//       S_WRITE_OUT_ADDR: begin
+//         if (m_axi_gmem_awready) begin
+//           write_active     <= 1'b1;
+//           write_beat_count <= 8'd0;
+//           write_data_reg   <= output_data_buffer[8'd0];
+//           write_last_reg   <= 1'b0;
+//           wbeats_sent      <= 8'd0;
+//         end
+//       end
+
+//       // Drive W channel - only advance on WREADY handshakes
+//       S_WRITE_OUT_DATA: begin
+//         if (write_active && m_axi_gmem_wready) begin
+//           wbeats_sent <= wbeats_sent + 1'b1;
+          
+//           if (write_beat_count == 8'd63) begin
+//             // This cycle completes the last beat
+//             write_active     <= 1'b0;
+//             write_last_reg   <= 1'b0;
+//             debug_wbeats_sent <= wbeats_sent + 1'b1; // Capture final count
+//           end else begin
+//             // Advance to next beat
+//             write_beat_count <= write_beat_count + 1'b1;
+//             write_data_reg   <= output_data_buffer[write_beat_count + 1'b1];
+//             write_last_reg   <= (write_beat_count + 1'b1 == 8'd63);
+//           end
+//         end
+//       end
+
+//       // Clear debug counter when starting new operation
+//       S_IDLE: begin
+//         if (start_pulse) begin
+//           wbeats_sent       <= 8'd0;
+//           debug_wbeats_sent <= 8'd0;
+//         end
+//       end
+
+//       default: ; // no change
+//     endcase
+//   end
+// end
+// ---- sequential write engine (only mutate your regs here)
 always @(posedge ap_clk) begin
   if (!ap_rst_n) begin
     write_active      <= 1'b0;
@@ -672,49 +777,36 @@ always @(posedge ap_clk) begin
     wbeats_sent       <= 8'd0;
     debug_wbeats_sent <= 8'd0;
   end else begin
-    case (current_state)
-      // Initialize write engine after AW handshake
-      S_WRITE_OUT_ADDR: begin
-        if (m_axi_gmem_awready) begin
-          write_active     <= 1'b1;
-          write_beat_count <= 8'd0;
-          write_data_reg   <= output_data_buffer[8'd0];
-          write_last_reg   <= 1'b0;
-          wbeats_sent      <= 8'd0;
-        end
-      end
+    // arm when AW handshakes
+    if (current_state == S_WRITE_OUT_ADDR && m_axi_gmem_awready) begin
+      write_active     <= 1'b1;
+      write_beat_count <= 8'd0;
+      write_data_reg   <= write_staging_buffer[8'd0]; // NOTE: from the staging copy
+      write_last_reg   <= (8'd0 == 8'd63);
+      wbeats_sent      <= 8'd0;
+    end
 
-      // Drive W channel - only advance on WREADY handshakes
-      S_WRITE_OUT_DATA: begin
-        if (write_active && m_axi_gmem_wready) begin
-          wbeats_sent <= wbeats_sent + 1'b1;
-          
-          if (write_beat_count == 8'd63) begin
-            // This cycle completes the last beat
-            write_active     <= 1'b0;
-            write_last_reg   <= 1'b0;
-            debug_wbeats_sent <= wbeats_sent + 1'b1; // Capture final count
-          end else begin
-            // Advance to next beat
-            write_beat_count <= write_beat_count + 1'b1;
-            write_data_reg   <= output_data_buffer[write_beat_count + 1'b1];
-            write_last_reg   <= (write_beat_count + 1'b1 == 8'd63);
-          end
-        end
+    // advance strictly on WREADY handshake
+    if (current_state == S_WRITE_OUT_DATA && write_active && m_axi_gmem_wready) begin
+      wbeats_sent <= wbeats_sent + 1'b1;
+      if (write_beat_count == 8'd63) begin
+        write_active      <= 1'b0;    // this beat completes the burst
+        write_last_reg    <= 1'b0;    // drop on next cycle
+        debug_wbeats_sent <= wbeats_sent + 1'b1;
+      end else begin
+        write_beat_count <= write_beat_count + 1'b1;
+        write_data_reg   <= write_staging_buffer[write_beat_count + 1'b1];
+        write_last_reg   <= (write_beat_count + 1'b1 == 8'd63);
       end
+    end
 
-      // Clear debug counter when starting new operation
-      S_IDLE: begin
-        if (start_pulse) begin
-          wbeats_sent       <= 8'd0;
-          debug_wbeats_sent <= 8'd0;
-        end
-      end
-
-      default: ; // no change
-    endcase
+    // clean up once we leave DATA
+    if (current_state != S_WRITE_OUT_DATA) begin
+      write_last_reg <= 1'b0;
+    end
   end
 end
+
 
   // FIXED: FSM and AXI Master interface
   always @(*) begin
@@ -746,6 +838,8 @@ end
         m_axi_gmem_arvalid = 1'b1;
         m_axi_gmem_araddr  = addr_a_reg;
         m_axi_gmem_arlen   = 8'd15; // 16 beats for 16x16 INT8 activation matrix
+        m_axi_gmem_arsize  = 3'b100; // 16 bytes per beat (128-bit)
+        m_axi_gmem_arburst = 2'b01; // INCR burst type
         if (m_axi_gmem_arready) next_state = S_FETCH_ACT_DATA;
       end
 
@@ -759,6 +853,8 @@ end
         m_axi_gmem_arvalid = 1'b1;
         m_axi_gmem_araddr  = addr_b_reg;
         m_axi_gmem_arlen   = 8'd15; // 16 beats for 16x16 INT8 weight matrix
+        m_axi_gmem_arsize  = 3'b100; // 16 bytes per beat (128-bit)
+        m_axi_gmem_arburst = 2'b01; // INCR burst type
         if (m_axi_gmem_arready) next_state = S_FETCH_WGT_DATA;
       end
 
@@ -768,32 +864,37 @@ end
           next_state = S_SYSTOLIC_COMPUTE;
       end
 
-      S_SYSTOLIC_COMPUTE: begin
-        if (systolic_cycle_count >= 8'd56)
-          next_state = S_WRITE_OUT_ADDR;
-      end
+      // ---- combinational FSM (only control the bus signals here)
+S_SYSTOLIC_COMPUTE: begin
+  if (systolic_cycle_count >= 8'd70 && packed_ready)
+    next_state = S_WRITE_OUT_ADDR;
+end
 
-      S_WRITE_OUT_ADDR: begin
-        m_axi_gmem_awvalid = 1'b1;
-        m_axi_gmem_awaddr  = addr_c_reg;
-        m_axi_gmem_awlen   = 8'd63; // 64 beats for 16x16 matrix of 32-bit values
-        if (m_axi_gmem_awready) next_state = S_WRITE_OUT_DATA;
-      end
+S_WRITE_OUT_ADDR: begin
+  // DRIVE AW
+  m_axi_gmem_awvalid = 1'b1;
+  m_axi_gmem_awaddr  = addr_c_reg;
+  m_axi_gmem_awlen   = 8'd63;     // 64 beats
+  if (m_axi_gmem_awready)
+    next_state = S_WRITE_OUT_DATA;
+end
 
-      S_WRITE_OUT_DATA: begin
-        m_axi_gmem_wvalid = write_active;
-        m_axi_gmem_wdata  = write_data_reg;
-        m_axi_gmem_wstrb  = 16'hFFFF;
-        m_axi_gmem_wlast  = write_last_reg;
-        if (m_axi_gmem_wvalid && m_axi_gmem_wready && m_axi_gmem_wlast) 
-          next_state = S_WAIT_WRITE_END;
-      end
+S_WRITE_OUT_DATA: begin
+  // DRIVE W from the regs (do not compute next here)
+  m_axi_gmem_wvalid = write_active;
+  m_axi_gmem_wdata  = write_data_reg;
+  m_axi_gmem_wstrb  = 16'hFFFF;
+  m_axi_gmem_wlast  = write_last_reg;
 
-      S_WAIT_WRITE_END: begin
-        m_axi_gmem_bready = 1'b1;
-        if (m_axi_gmem_bvalid && m_axi_gmem_bready) 
-          next_state = S_DONE;
-      end
+  if (m_axi_gmem_wvalid && m_axi_gmem_wready && m_axi_gmem_wlast)
+    next_state = S_WAIT_WRITE_END;
+end
+
+S_WAIT_WRITE_END: begin
+  m_axi_gmem_bready = 1'b1;
+  if (m_axi_gmem_bvalid && m_axi_gmem_bready)
+    next_state = S_DONE;
+end
 
       S_DONE: 
         next_state = S_IDLE;

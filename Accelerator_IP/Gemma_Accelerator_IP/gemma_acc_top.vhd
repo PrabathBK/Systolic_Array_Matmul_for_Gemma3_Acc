@@ -112,7 +112,7 @@ architecture Accelerator_Top_a of Accelerator_Top is
         -- AXI-Lite control
         s_axi_control_awvalid : IN  std_logic;
         s_axi_control_awready : OUT std_logic;
-        s_axi_control_awaddr  : IN  std_logic_vector(5 downto 0);
+        s_axi_control_awaddr  : IN  std_logic_vector(7 downto 0);
         s_axi_control_wvalid  : IN  std_logic;
         s_axi_control_wready  : OUT std_logic;
         s_axi_control_wdata   : IN  std_logic_vector(31 downto 0);
@@ -124,7 +124,7 @@ architecture Accelerator_Top_a of Accelerator_Top is
         s_axi_control_bid     : OUT std_logic_vector(0 downto 0);
         s_axi_control_arvalid : IN  std_logic;
         s_axi_control_arready : OUT std_logic;
-        s_axi_control_araddr  : IN  std_logic_vector(5 downto 0);
+        s_axi_control_araddr  : IN  std_logic_vector(7 downto 0);
         s_axi_control_rvalid  : OUT std_logic;
         s_axi_control_rready  : IN  std_logic;
         s_axi_control_rdata   : OUT std_logic_vector(31 downto 0);
@@ -165,8 +165,8 @@ architecture Accelerator_Top_a of Accelerator_Top is
     END COMPONENT;
 
     -- Internal signals for width conversion
-    signal control_awaddr : std_logic_vector(5 downto 0);
-    signal control_araddr : std_logic_vector(5 downto 0);
+    signal control_awaddr : std_logic_vector(7 downto 0);
+    signal control_araddr : std_logic_vector(7 downto 0);
     signal control_wdata  : std_logic_vector(31 downto 0);
     signal control_wstrb  : std_logic_vector(3 downto 0);
     signal control_rdata  : std_logic_vector(31 downto 0);
@@ -192,9 +192,9 @@ begin
     m_axi_arprot  <= "000";
 
     -- AXI-Lite control interface width conversion (64-bit slave to 32-bit accelerator)
-    -- Address conversion (only use lower 6 bits)
-    control_awaddr <= s_axi_awaddr(5 downto 0);
-    control_araddr <= s_axi_araddr(5 downto 0);
+    -- Address conversion (use lower 8 bits for expanded debug register access)
+    control_awaddr <= s_axi_awaddr(7 downto 0);
+    control_araddr <= s_axi_araddr(7 downto 0);
     
     -- Data width conversion (select 32-bit word based on address bits [3:2])
     control_wdata <= s_axi_wdata(31 downto 0)   when s_axi_awaddr(3 downto 2) = "00"  else
