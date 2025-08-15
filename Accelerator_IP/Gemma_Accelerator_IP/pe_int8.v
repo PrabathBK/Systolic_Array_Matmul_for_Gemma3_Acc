@@ -11,7 +11,7 @@ module pe_int8 #(
     output reg  [DATA_WIDTH-1:0] outp_south,
     output reg  [DATA_WIDTH-1:0] outp_east,
     output reg valid_out,
-    output reg [ACCUM_WIDTH-1:0] result
+    output reg signed [ACCUM_WIDTH-1:0] result
 );
     
     // FIXED: Pipeline the valid signal to match data timing
@@ -23,7 +23,9 @@ module pe_int8 #(
             result <= 0;
         end else if (valid) begin  // Use current valid signal
             // Accumulate whenever valid is high (including zero values)
-            result <= result + (inp_north * inp_west);
+            // result <= result + (inp_north * inp_west);
+            result <= result + ($signed(inp_north) * $signed(inp_west));
+
         end
         // If valid is 0, result holds its previous value
     end

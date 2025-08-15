@@ -142,7 +142,7 @@ localparam [7:0]
   reg                           weight_loaded;
 
   // Result management
-  reg [ACCUM_WIDTH-1:0]         result_matrix [0:SYSTOLIC_SIZE-1][0:SYSTOLIC_SIZE-1];
+  reg signed [ACCUM_WIDTH-1:0]  result_matrix [0:SYSTOLIC_SIZE-1][0:SYSTOLIC_SIZE-1];
   reg [127:0]                   output_data_buffer [0:63];
   reg [4:0]                     output_buffer_idx;
   reg                           capture_results;

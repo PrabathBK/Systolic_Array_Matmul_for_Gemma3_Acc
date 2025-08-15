@@ -2714,10 +2714,12 @@ void run_random_matrix_tests(void) {
         for (int i = 0; i < 256; i++) {
             // Update seed using LCG: next = (a * seed + c) % m
             seed = (seed * 1103515245 + 12345) & 0x7FFFFFFF;
-            matrix_a[i] = (int8_t)((seed >> 8) & 0x7F);  // 0 to 127 (positive only)
+            //matrix_a[i] = (int8_t)((seed >> 8) & 0x7F);  // 0 to 127 (positive only)
+            matrix_a[i] = (int8_t)((seed >> 8) & 0xFF);  // -128 to 127 (full signed range)
             
             seed = (seed * 1103515245 + 12345) & 0x7FFFFFFF;
-            matrix_b[i] = (int8_t)((seed >> 8) & 0x7F);  // 0 to 127 (positive only)
+            //matrix_b[i] = (int8_t)((seed >> 8) & 0x7F);  // 0 to 127 (positive only)
+            matrix_b[i] = (int8_t)((seed >> 8) & 0xFF);  // -128 to 127 (full signed range)
             
             // Clear result arrays
             matrix_c_acc[i] = 0xDEADBEEF;
