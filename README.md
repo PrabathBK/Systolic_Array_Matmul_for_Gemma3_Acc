@@ -35,9 +35,8 @@ This implements a parameterizable **systolic array matrix multiplier** with:
 
 | Parameter    | Description                         | Default |
 |--------------|-------------------------------------|---------|
-| `SIZE`       | Matrix dimension (NxN)              | 8       |
-| `DATA_WIDTH` | Bit width per element (INT4 used)   | 4       |
-| `BUFFER_DEPTH` | Internal buffer depth             | 256     |
+| `SIZE`       | Matrix dimension (NxN)              | 16,32   |
+| `DATA_WIDTH` | Bit width per element (INT4 used)   | 8       |
 
 ---
 
