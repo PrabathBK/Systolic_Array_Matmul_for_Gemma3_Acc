@@ -1,6 +1,10 @@
+`timescale 1ns / 1ps
+
 module pe_int8 #(
     parameter DATA_WIDTH = 8,
-    parameter ACCUM_WIDTH = 32
+    parameter ACCUM_WIDTH = 32,
+    parameter PE_ROW = 0,
+    parameter PE_COL = 0
 )(
     input clk,
     input rst,
@@ -11,12 +15,13 @@ module pe_int8 #(
     output reg  [DATA_WIDTH-1:0] outp_south,
     output reg  [DATA_WIDTH-1:0] outp_east,
     output reg valid_out,
-    output reg signed [ACCUM_WIDTH-1:0] result
+    (* use_dsp = "yes" *) output reg signed [ACCUM_WIDTH-1:0] result
+        // output reg signed [ACCUM_WIDTH-1:0] result
 );
-    
+
     // FIXED: Pipeline the valid signal to match data timing
     reg valid_reg;
-    
+
     // FIXED: Accumulation logic - use the current cycle's valid signal
     always @(posedge clk) begin
         if (rst || accum_reset) begin
@@ -25,11 +30,10 @@ module pe_int8 #(
             // Accumulate whenever valid is high (including zero values)
             // result <= result + (inp_north * inp_west);
             result <= result + ($signed(inp_north) * $signed(inp_west));
-
         end
         // If valid is 0, result holds its previous value
     end
-    
+
     // Data flow pipeline with pipelined valid signal
     always @(posedge clk) begin
         if (rst) begin
