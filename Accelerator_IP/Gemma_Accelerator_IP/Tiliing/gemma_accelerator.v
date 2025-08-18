@@ -1,4 +1,3 @@
-
 `timescale 1ns / 1ps
 
 module gemma_accelerator #(
@@ -63,7 +62,14 @@ module gemma_accelerator #(
   output reg                   m_axi_gmem_rready,
   input  wire [127:0]          m_axi_gmem_rdata,
   input  wire                  m_axi_gmem_rlast,
-  input  wire [1:0]            m_axi_gmem_rresp
+  input  wire [1:0]            m_axi_gmem_rresp,
+
+  // Streaming status output signals
+  output wire                  result_ready_interrupt,  // High when any result is ready
+  output wire                  ping_buffer_ready,       // Ping buffer available for new data
+  output wire                  pong_buffer_ready,       // Pong buffer available for new data
+  output wire                  ping_result_available,   // Ping result ready for read
+  output wire                  pong_result_available    // Pong result ready for read
 );
 
   // FSM states
@@ -114,7 +120,13 @@ localparam [7:0]
   MATRIX_DIMS     = 8'h78,  // {total_cols[15:0], total_rows[15:0]}
   TILE_POS        = 8'h7C,  // {current_tile_col[15:0], current_tile_row[15:0]}
   CHAIN_CTRL      = 8'h80,  // {31'b0, chain_mode_en}
-  CHAIN_STATUS    = 8'h84;  // {30'b0, chain_complete, chain_active}
+  CHAIN_STATUS    = 8'h84,  // {30'b0, chain_complete, chain_active}
+
+  // Streaming control registers
+  BUFFER_STATUS   = 8'h88,  // Buffer availability and result ready status
+  COMPUTATION_ID  = 8'h8C,  // Track computation IDs for each buffer
+  BUFFER_CTRL     = 8'h90,  // Independent buffer control
+  STREAM_CONFIG   = 8'h94;  // Streaming mode configuration
 
 
   reg [3:0]   current_state, next_state;
@@ -122,6 +134,32 @@ localparam [7:0]
   reg [63:0]  addr_a_reg, addr_b_reg, addr_c_reg;
   reg         start_pulse;
   reg         accelerator_done;  // FIXED: Add done signal
+
+  // Streaming control signals for ping-pong buffer management
+  reg         ping_input_ready;      // Ping buffer ready for new data
+  reg         pong_input_ready;      // Pong buffer ready for new data
+  reg         ping_result_ready;     // Ping result available for read
+  reg         pong_result_ready;     // Pong result available for read
+  reg         ping_computing;        // Ping buffer computation in progress
+  reg         pong_computing;        // Pong buffer computation in progress
+  reg         ping_loading;          // Ping buffer data loading in progress
+  reg         pong_loading;          // Pong buffer data loading in progress
+
+  // Computation tracking for streaming
+  reg [15:0]  ping_comp_id;         // Current computation ID in ping buffer
+  reg [15:0]  pong_comp_id;         // Current computation ID in pong buffer
+  reg [15:0]  next_comp_id;         // Next computation ID to assign
+  reg [15:0]  completed_comp_id;    // Last completed computation ID
+
+  // Streaming mode configuration
+  reg         stream_mode_en;        // Enable streaming mode
+  reg         auto_buffer_switch;    // Automatic buffer switching
+  reg         ping_start_req;        // Start computation request for ping buffer
+  reg         pong_start_req;        // Start computation request for pong buffer
+
+  // Buffer state tracking
+  reg [2:0]   ping_state;           // Ping buffer state (IDLE=0, LOADING=1, COMPUTING=2, DONE=3)
+  reg [2:0]   pong_state;           // Pong buffer state (IDLE=0, LOADING=1, COMPUTING=2, DONE=3)
 
   // Matrix chaining control registers
   reg [63:0]  act_base_addr;     // Base address for activation matrices
@@ -258,8 +296,8 @@ localparam [7:0]
   reg                           read_buffer_select;       // Buffer to read from (captured at computation end)
 
   // Unified output buffer access (muxed based on output_buffer_select)
-  reg [127:0]                   output_data_buffer [0:63]; // For computation writes
-  reg [127:0]                   write_staging_buffer [0:63]; // For AXI writes
+  // reg [127:0]                   output_data_buffer [0:63]; // For computation writes
+  reg [127:0]                   output_data_buffer [0:63]; // For AXI writes
 
   reg [5:0]                     output_buffer_idx;
   reg                           capture_results;
@@ -414,6 +452,8 @@ reg         write_last_reg;
       weight_loaded <= 1'b0;
       accelerator_done <= 1'b0;  // FIXED: Initialize done flag
 
+      // Streaming control signals moved to dedicated always block to avoid multiple drivers
+
       // Initialize double buffering control
       buffer_select <= 1'b0;
       next_buffer_select <= 1'b1;
@@ -505,6 +545,15 @@ reg         write_last_reg;
         accelerator_done <= 1'b1;
       else if (start_pulse)  // Clear done when starting new computation
         accelerator_done <= 1'b0;
+
+      // Streaming buffer state management
+      // Update ping buffer state
+      // Ping/Pong buffer state machines moved to dedicated always block to avoid multiple drivers
+      // This section is now handled in the streaming control always block
+
+      // Clear start requests after one cycle
+      ping_start_req <= 1'b0;
+      pong_start_req <= 1'b0;
 
       // FIXED: Chain completion tracking
       if (current_state == S_WAIT_WRITE_END && m_axi_gmem_bvalid && m_axi_gmem_bready && chain_mode_en) begin
@@ -790,16 +839,16 @@ end
           // DEBUG: Show input data for first few cycles of first tile
           if (current_tile_row == 0 && current_tile_col == 0 && input_cycle_count < 4) begin
             if (skew_i == 0 || skew_i == 1) begin
-              $display("SYSTOLIC_DEBUG[%0d]: PE[0][%0d] cycle=%0d north=%0d west=%0d k_idx=%0d", 
-                       $time, skew_i, input_cycle_count, 
+              $display("SYSTOLIC_DEBUG[%0d]: PE[0][%0d] cycle=%0d north=%0d west=%0d k_idx=%0d",
+                       $time, skew_i, input_cycle_count,
                        weight_matrix[input_cycle_count - skew_i - 1][skew_i],
                        activation_matrix[skew_i][input_cycle_count - skew_i - 1],
                        input_cycle_count - skew_i - 1);
               // Additional debug: Show matrix values being accessed
               if (skew_i == 1 && input_cycle_count == 2) begin
-                $display("MATRIX_DEBUG[%0d]: weight_matrix[0][1]=%0d activation_matrix[1][0]=%0d", 
+                $display("MATRIX_DEBUG[%0d]: weight_matrix[0][1]=%0d activation_matrix[1][0]=%0d",
                          $time, weight_matrix[0][1], activation_matrix[1][0]);
-                $display("MATRIX_DEBUG[%0d]: Expected: B[0][1]=%0d A[1][0]=%0d", 
+                $display("MATRIX_DEBUG[%0d]: Expected: B[0][1]=%0d A[1][0]=%0d",
                          $time, 2, 2);
               end
             end
@@ -896,7 +945,7 @@ always @(posedge ap_clk) begin
           // FIXED: Debug final accumulated results
           if (i == 0 && j == 0) begin
             // Debug: Final result for position (0,0)
-            
+
             // Debug: Compare with expected value (simplified calculation)
             if (current_tile_row == 0 && current_tile_col == 0) begin
               if (current_inner_k == 0) begin
@@ -1088,6 +1137,33 @@ end
             chain_active <= 1'b0;
           end
         end
+
+        // Streaming control registers
+        BUFFER_CTRL: begin
+          // Handle buffer control commands
+          if (wdata_latched[0]) begin  // Start ping computation
+            ping_start_req <= 1'b1;
+          end
+          if (wdata_latched[1]) begin  // Start pong computation
+            pong_start_req <= 1'b1;
+          end
+          // Streaming buffer control moved to dedicated always block below
+        end
+
+        STREAM_CONFIG: begin
+          stream_mode_en <= wdata_latched[0];
+          auto_buffer_switch <= wdata_latched[1];
+          if (wdata_latched[16]) begin  // Reset computation IDs
+            next_comp_id <= 16'h1;
+            completed_comp_id <= 16'h0;
+          end
+        end
+
+        COMPUTATION_ID: begin
+          // Allow manual setting of computation IDs for debugging
+          ping_comp_id <= merge_by_wstrb(ping_comp_id, wdata_latched[15:0], wstrb_latched[1:0]);
+          pong_comp_id <= merge_by_wstrb(pong_comp_id, wdata_latched[31:16], wstrb_latched[3:2]);
+        end
         DBG_BUF_INDEX:  debug_buffer_index <= merge_by_wstrb(debug_buffer_index, wdata_latched, wstrb_latched);
         default: ;
       endcase
@@ -1127,7 +1203,7 @@ end
   // This ensures proper ping-pong buffer selection for debug access
 
 // Output buffer staging logic now handled by the ping-pong multiplexer above
-// write_staging_buffer is automatically updated via the mux based on output_buffer_select
+// output_data_buffer is automatically updated via the mux based on output_buffer_select
 
 
 
@@ -1175,6 +1251,45 @@ end
           CHAIN_CTRL:     s_axi_control_rdata <= {31'b0, chain_mode_en};
           CHAIN_STATUS:   s_axi_control_rdata <= {30'b0, chain_complete, chain_active};
 
+          // Streaming control registers
+          BUFFER_STATUS: begin
+            s_axi_control_rdata <= {
+              20'd0,
+              pong_loading,        // Bit 11: Pong buffer loading
+              ping_loading,        // Bit 10: Ping buffer loading
+              2'b00,               // Bits 9-8: Reserved
+              pong_state[1:0],     // Bits 7-6: Pong buffer state
+              ping_state[1:0],     // Bits 5-4: Ping buffer state
+              pong_result_ready,   // Bit 3: Pong result ready
+              ping_result_ready,   // Bit 2: Ping result ready
+              pong_input_ready,    // Bit 1: Pong buffer available
+              ping_input_ready     // Bit 0: Ping buffer available
+            };
+          end
+
+          COMPUTATION_ID: begin
+            s_axi_control_rdata <= {pong_comp_id, ping_comp_id};
+          end
+
+          BUFFER_CTRL: begin
+            s_axi_control_rdata <= {
+              28'd0,
+              pong_start_req,      // Bit 3: Pong start request pending
+              ping_start_req,      // Bit 2: Ping start request pending
+              pong_computing,      // Bit 1: Pong computing
+              ping_computing       // Bit 0: Ping computing
+            };
+          end
+
+          STREAM_CONFIG: begin
+            s_axi_control_rdata <= {
+              14'd0,
+              completed_comp_id,   // Bits 17-2: Last completed computation ID
+              auto_buffer_switch,  // Bit 1: Auto buffer switching enabled
+              stream_mode_en       // Bit 0: Streaming mode enabled
+            };
+          end
+
           // tiny buffer peek window
           DBG_BUF_INDEX:    s_axi_control_rdata <= debug_buffer_index;
           DBG_BUF_DATA_LS:  s_axi_control_rdata <= (debug_buffer_index < BUFFER_DEPTH) ? act_buf_rd_data[31:0]  : 32'hDEADBEEF;
@@ -1194,6 +1309,85 @@ end
     end
   end
 
+  // Streaming status output assignments
+  assign result_ready_interrupt = ping_result_ready | pong_result_ready;
+  assign ping_buffer_ready = ping_input_ready;
+  assign pong_buffer_ready = pong_input_ready;
+  assign ping_result_available = ping_result_ready;
+  assign pong_result_available = pong_result_ready;
+
+  // Dedicated always block for streaming register control to avoid multiple drivers
+  always @(posedge ap_clk) begin
+    if (!ap_rst_n) begin
+      // Initialize streaming control signals
+      ping_input_ready <= 1'b1;      // Initially ping buffer is ready
+      pong_input_ready <= 1'b1;      // Initially pong buffer is ready
+      ping_result_ready <= 1'b0;     // No results initially
+      pong_result_ready <= 1'b0;     // No results initially
+      ping_computing <= 1'b0;        // Not computing initially
+      pong_computing <= 1'b0;        // Not computing initially
+      ping_loading <= 1'b0;          // Not loading initially
+      pong_loading <= 1'b0;          // Not loading initially
+      ping_comp_id <= 16'h0;         // Initialize computation IDs
+      pong_comp_id <= 16'h0;
+      next_comp_id <= 16'h1;         // Start with ID 1
+      completed_comp_id <= 16'h0;
+      stream_mode_en <= 1'b0;        // Streaming mode disabled initially
+      auto_buffer_switch <= 1'b0;    // Manual buffer control initially
+      ping_start_req <= 1'b0;        // No start requests
+      pong_start_req <= 1'b0;
+      ping_state <= 3'b000;          // IDLE
+      pong_state <= 3'b000;          // IDLE
+    end else begin
+      // Handle BUFFER_CTRL register writes
+      if (s_axi_control_awvalid && s_axi_control_awready && s_axi_control_wvalid && s_axi_control_wready &&
+          ({s_axi_control_awaddr[7:2], 2'b00} == BUFFER_CTRL)) begin
+        if (s_axi_control_wdata[0]) begin  // Start ping buffer
+          ping_state <= 3'b010;        // COMPUTING
+          ping_computing <= 1'b1;
+          ping_input_ready <= 1'b0;
+          ping_comp_id <= next_comp_id;
+          next_comp_id <= next_comp_id + 1'b1;
+        end
+
+        if (s_axi_control_wdata[1]) begin  // Start pong buffer
+          pong_state <= 3'b010;        // COMPUTING
+          pong_computing <= 1'b1;
+          pong_input_ready <= 1'b0;
+          pong_comp_id <= next_comp_id;
+          next_comp_id <= next_comp_id + 1'b1;
+        end
+
+        if (s_axi_control_wdata[2]) begin  // Clear ping result ready
+          ping_result_ready <= 1'b0;
+          ping_input_ready <= 1'b1;
+          ping_state <= 3'b000;  // Reset to IDLE
+        end
+
+        if (s_axi_control_wdata[3]) begin  // Clear pong result ready
+          pong_result_ready <= 1'b0;
+          pong_input_ready <= 1'b1;
+          pong_state <= 3'b000;  // Reset to IDLE
+        end
+      end
+
+      // Check ping completion and set result ready
+      if (ping_computing && current_state == S_DONE) begin
+        ping_state <= 3'b011;        // DONE
+        ping_computing <= 1'b0;
+        ping_result_ready <= 1'b1;
+        completed_comp_id <= ping_comp_id;
+      end
+
+      // Check pong completion and set result ready
+      if (pong_computing && current_state == S_DONE) begin
+        pong_state <= 3'b011;        // DONE
+        pong_computing <= 1'b0;
+        pong_result_ready <= 1'b1;
+        completed_comp_id <= pong_comp_id;
+      end
+    end
+  end
 
 // Replace the entire write engine always block with this:
 // always @(posedge ap_clk) begin
@@ -1314,8 +1508,20 @@ end
 
     case (current_state)
       S_IDLE: begin
-        if (start_pulse) begin
-          next_state = S_FETCH_ACT_ADDR;
+        if (stream_mode_en) begin
+          // Streaming mode: check for buffer start requests
+          if (ping_start_req && ping_input_ready) begin
+            buffer_select = 1'b0;  // Use ping buffer
+            next_state = S_FETCH_ACT_ADDR;
+          end else if (pong_start_req && pong_input_ready) begin
+            buffer_select = 1'b1;  // Use pong buffer
+            next_state = S_FETCH_ACT_ADDR;
+          end
+        end else begin
+          // Legacy mode: use start_pulse
+          if (start_pulse) begin
+            next_state = S_FETCH_ACT_ADDR;
+          end
         end
       end
 
