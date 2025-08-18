@@ -725,9 +725,9 @@ end
   always @(*) begin
     for (mux_i = 0; mux_i < 64; mux_i = mux_i + 1) begin
       if (read_buffer_select) begin
-        write_staging_buffer[mux_i] = output_buf_pong[mux_i];
+        output_data_buffer[mux_i] = output_buf_pong[mux_i];
       end else begin
-        write_staging_buffer[mux_i] = output_buf_ping[mux_i];
+        output_data_buffer[mux_i] = output_buf_ping[mux_i];
       end
     end
 
@@ -1262,7 +1262,7 @@ always @(posedge ap_clk) begin
     if (current_state == S_WRITE_OUT_ADDR && m_axi_gmem_awready) begin
       write_active     <= 1'b1;
       write_beat_count <= 8'd0;
-      write_data_reg   <= write_staging_buffer[8'd0]; // NOTE: from the staging copy
+      write_data_reg   <= output_data_buffer[8'd0]; // NOTE: from the staging copy
       write_last_reg   <= (8'd0 == 8'd63);
       wbeats_sent      <= 8'd0;
       // Debug write start (removed for clean synthesis)
@@ -1277,7 +1277,7 @@ always @(posedge ap_clk) begin
         debug_wbeats_sent <= wbeats_sent + 1'b1;
       end else begin
         write_beat_count <= write_beat_count + 1'b1;
-        write_data_reg   <= write_staging_buffer[write_beat_count + 1'b1];
+        write_data_reg   <= output_data_buffer[write_beat_count + 1'b1];
         write_last_reg   <= (write_beat_count + 1'b1 == 8'd63);
       end
     end
