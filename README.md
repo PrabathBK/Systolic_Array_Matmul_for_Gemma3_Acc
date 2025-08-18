@@ -42,13 +42,13 @@ Systolic_Array_Matmul_for_Gemma3_Acc/
 ## 🖼️ Architecture Overview
 
 ### Systolic Array Block Diagram
-![systolic array architecture diagram](/Users/prabathwijethilaka/DVCON/Systolic_Array_Matmul_for_Gemma3_Acc/Systolic_Array_Matmul_for_Gemma3_Acc/sys_block.png)
+![systolic array architecture diagram](https://github.com/PrabathBK/Systolic_Array_Matmul_for_Gemma3_Acc/blob/main/Results/sys_block.png)
 
 
 The systolic array consists of a grid of Processing Elements (PEs) that perform matrix multiplication in a pipelined fashion. Data flows through the array in a wave-like pattern, maximizing computational throughput.
 
 ### Tiling Architecture (32×32 via 16×16 tiles)
-*[Placeholder: Insert tiling diagram image]*
+![Tilling architecture diagram](https://github.com/PrabathBK/Systolic_Array_Matmul_for_Gemma3_Acc/blob/main/Results/Acc_IP.png)
 
 The tiling implementation allows larger matrix multiplications by decomposing them into smaller sub-matrices that fit within the 16×16 systolic array, then combining the results.
 
@@ -59,7 +59,6 @@ The tiling implementation allows larger matrix multiplications by decomposing th
 - **`systolic_array_16x16.v`** - Configurable 16×16 systolic array grid
 - **`pe_int8.v`** - Processing element: INT8×INT8 multiply with 32-bit accumulation
 - **`accelerator_buffer.v`** - Input/output buffers for A, B matrices and result staging
-- **`axi_control_fsm.v`** - Finite state machine for AXI transaction control
 
 ### Systolic Array IP Variants
 - **Scalable Implementation**: Parameterized systolic arrays supporting various dimensions
@@ -73,64 +72,17 @@ The tiling implementation allows larger matrix multiplications by decomposing th
 
 #### INT8 16×16 IP on VEGA Processor SoC
 - ✅ **Simulation verified** (waveform screenshots below)
-- ✅ **Hardware implementation successful** 
-- ✅ **Benchmarks executed** (performance results below)
+![IP Wave - Data flow](https://github.com/PrabathBK/Systolic_Array_Matmul_for_Gemma3_Acc/blob/main/Results/IP1.png)
+![IP Wave - Results](https://github.com/PrabathBK/Systolic_Array_Matmul_for_Gemma3_Acc/blob/main/Results/IP2.png)
 
-*[Placeholder: Insert waveform screenshot 1]*
-*[Placeholder: Insert waveform screenshot 2]*
-*[Placeholder: Insert benchmark performance image]*
+- ✅ **Hardware implementation successful - Benchmark**
+![Systolic SOC Benchmark](https://github.com/PrabathBK/Systolic_Array_Matmul_for_Gemma3_Acc/blob/main/Results/systolic_soc_implementation.png)
 
-#### Tiling IP (32×32 using 16×16 array) on SoC
-- ✅ **Implementation passed**
-- ✅ **Benchmark completed successfully**
+#### Tiling IP (32×32 using 16×16 systolic array) on SoC
+- ✅ **Implementation Results**
+![Systolic SOC Benchmark](https://github.com/PrabathBK/Systolic_Array_Matmul_for_Gemma3_Acc/blob/main/Results/Tiling_log.png)
 
-*[Placeholder: Insert tiling implementation results image]*
 
-### Performance Metrics
-- **Throughput**: X GOPS (Giga Operations Per Second)
-- **Latency**: Y cycles for 16×16 matrix multiplication
-- **Resource Utilization**: 
-  - LUTs: X%
-  - DSPs: Y%
-  - BRAM: Z%
-- **Power Consumption**: W watts at X MHz
-
-## 🛠️ How to Use
-
-### Prerequisites
-- Xilinx Vivado 2021.1 or later
-- VEGA RISC-V processor development environment
-- GCC cross-compiler for RISC-V
-
-### Building the RTL Design
-
-1. **Clone the repository**:
-   ```bash
-   git clone https://github.com/PrabathBK/Systolic_Array_Matmul_for_Gemma3_Acc.git
-   cd Systolic_Array_Matmul_for_Gemma3_Acc
-   ```
-
-2. **Open in Vivado**:
-   ```bash
-   cd Accelerator_IP/Gemma_Accelerator_IP/INT8_16x16/
-   vivado -source build_project.tcl
-   ```
-
-3. **Run synthesis and implementation**:
-   ```tcl
-   launch_runs synth_1
-   wait_on_run synth_1
-   launch_runs impl_1 -to_step write_bitstream
-   wait_on_run impl_1
-   ```
-
-### Software Integration
-
-#### Compiling the Host Application
-```bash
-cd Application/INT8_16x16/
-riscv64-unknown-elf-gcc -O2 -o matmul_test main.c host.c matmul_offload.c benchmark.c
-```
 
 #### Integration with VEGA Processor
 
@@ -142,41 +94,6 @@ riscv64-unknown-elf-gcc -O2 -o matmul_test main.c host.c matmul_offload.c benchm
 3. **Wait for completion** (done flag or interrupt)
 4. **Read results from memory** (C matrix)
 
-#### Example Usage
-```c
-// Initialize accelerator
-accelerator_init(ACCELERATOR_BASE_ADDR);
-
-// Set up matrices
-set_matrix_a_addr(matrix_a_addr);
-set_matrix_b_addr(matrix_b_addr);
-set_result_addr(result_addr);
-set_dimensions(16, 16, 16);
-
-// Start computation
-start_accelerator();
-
-// Wait for completion
-while(!is_accelerator_done()) {
-    // Poll or wait for interrupt
-}
-
-// Results are now available in result_addr
-```
-
-### Running Testbenches
-
-#### Simulation
-```bash
-cd Accelerator_IP/Gemma_Accelerator_IP/INT8_16x16/testbench/
-vivado -mode batch -source run_simulation.tcl
-```
-
-#### Benchmark Testing
-```bash
-cd Application/INT8_16x16/
-./matmul_test
-```
 
 ## 🔧 Configuration Options
 
@@ -199,38 +116,5 @@ cd Application/INT8_16x16/
 3. **Tiling Strategy**: Choose tile sizes that maximize array utilization
 4. **Pipeline Optimization**: Overlap data loading with computation when possible
 
-## 📈 Roadmap
-
-- [ ] **Larger array implementations** (64×64, 128×128)
-- [ ] **Advanced scheduling**: overlapping DMA + compute operations
-- [ ] **Post-processing ops**: ReLU, quantization, normalization
-- [ ] **Support for more LLM layers**: attention mechanisms, projection layers
-- [ ] **Multi-precision support**: FP16, BF16, INT16
-- [ ] **Power optimization**: clock gating, voltage scaling
-- [ ] **Software stack**: PyTorch/TensorFlow integration
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-## 📝 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 🙏 Acknowledgments
-
-- VEGA RISC-V processor development team
-- Gemma LLM research community
-- Xilinx/AMD for development tools and documentation
-
-## 📧 Contact
-
-For questions or collaboration opportunities, please open an issue or contact the repository maintainer.
-
----
 
 **Note**: This accelerator is designed specifically for the Gemma LLM inference pipeline and may require modifications for other neural network architectures.
