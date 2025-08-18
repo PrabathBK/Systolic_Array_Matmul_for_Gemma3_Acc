@@ -443,7 +443,7 @@ reg         write_last_reg;
       input_cycle_count <= 8'd0;
       output_buffer_idx <= 6'd0;
       systolic_computing <= 1'b0;
-      capture_results <= 1'b0;
+      // capture_results <= 1'b0;
       output_buffer_select <= 1'b0;
       output_next_buffer_select <= 1'b1;
       output_buffer_switched <= 1'b0;
@@ -474,22 +474,7 @@ reg         write_last_reg;
     end else begin
       current_state <= next_state;
 
-      // Handle tile stepping for matrix chaining - 3-level nested loop
-      if (current_state == S_CHAIN_NEXT_TILE) begin
-        if (current_inner_k < tiles_per_inner - 1) begin
-          // Move to next inner dimension for same output tile
-          current_inner_k <= current_inner_k + 1;
-        end else if (current_tile_col < tiles_per_col - 1) begin
-          // Move to next column in same row, reset inner k
-          current_inner_k <= 16'd0;
-          current_tile_col <= current_tile_col + 1;
-        end else begin
-          // Move to first column of next row, reset inner k
-          current_inner_k <= 16'd0;
-          current_tile_col <= 16'd0;
-          current_tile_row <= current_tile_row + 1;
-        end
-      end
+
 
 
 
@@ -526,6 +511,17 @@ reg         write_last_reg;
 
       // Both matrices loaded - give one extra cycle for stabilization
       matrices_loaded <= activation_loaded && weight_loaded;
+
+      //  if (stream_mode_en && current_state == S_IDLE) begin
+      //     // Streaming mode: check for buffer start requests
+      //     if (ping_start_req && ping_input_ready) begin
+      //       buffer_select <= 1'b0;  // Use ping buffer
+      //       next_state = S_FETCH_ACT_ADDR;
+      //     end else if (pong_start_req && pong_input_ready) begin
+      //       buffer_select <= 1'b1;  // Use pong buffer
+      //       next_state = S_FETCH_ACT_ADDR;
+      //     end
+      //  end
 
       // Swap buffers when transitioning to computation state - this allows next tile to be loaded
       // into the other buffer while current computation is running
@@ -564,6 +560,11 @@ reg         write_last_reg;
           chain_active <= 1'b0;
         end
       end
+      if ((current_state == CHAIN_CTRL && wdata_latched[0])||(start_pulse && chain_mode_en)) begin
+      // Clear completion flags when starting new operation
+      chain_complete <= 1'b0;
+      chain_active <= 1'b0;
+    end
 
 if (current_state == S_SYSTOLIC_COMPUTE) begin
   systolic_cycle_count <= systolic_cycle_count + 1'b1;
@@ -579,7 +580,7 @@ end else begin
   systolic_computing     <= 1'b0;
   systolic_cycle_count   <= 8'd0;
   input_cycle_count      <= 8'd0;
-  capture_results        <= 1'b0;
+  // capture_results        <= 1'b0;
 end
 
       // Output buffer management
@@ -871,45 +872,6 @@ end
     end
   end
 
-  // // Result capture and output buffer preparation
-  // integer i, j;
-  // always @(posedge ap_clk) begin
-  //   if (!ap_rst_n) begin
-  //     for (i = 0; i < SYSTOLIC_SIZE; i = i + 1) begin
-  //       for (j = 0; j < SYSTOLIC_SIZE; j = j + 1) begin
-  //         result_matrix[i][j] <= {ACCUM_WIDTH{1'b0}};
-  //       end
-  //     end
-  //     for (i = 0; i < 64; i = i + 1) begin
-  //       output_data_buffer[i] <= 128'd0;
-  //     end
-  //   end else begin
-  //     // Capture results when computation is complete
-  //     if (capture_results && systolic_cycle_count == 8'd49) begin
-  //       for (i = 0; i < SYSTOLIC_SIZE; i = i + 1) begin
-  //         for (j = 0; j < SYSTOLIC_SIZE; j = j + 1) begin
-  //           result_matrix[i][j] <= systolic_results[(i*SYSTOLIC_SIZE + j + 1)*ACCUM_WIDTH - 1 -: ACCUM_WIDTH];
-  //         end
-  //       end
-  //     end
-
-  //     // Prepare output data buffer - pack 4×32-bit values per 128-bit word
-  //     if (current_state == S_SYSTOLIC_COMPUTE && systolic_cycle_count == 8'd50) begin
-  //       for (i = 0; i < SYSTOLIC_SIZE; i = i + 1) begin
-  //         for (j = 0; j < SYSTOLIC_SIZE; j = j + 4) begin
-  //           buf_idx = i * 4 + j/4;
-  //           output_data_buffer[buf_idx] <= {
-  //             result_matrix[i][j+3],
-  //             result_matrix[i][j+2],
-  //             result_matrix[i][j+1],
-  //             result_matrix[i][j+0]
-  //           };
-  //         end
-  //       end
-  //     end
-  //   end
-  // end
-
   // Result capture and output buffer preparation
 integer i, j, buf_idx;
 always @(posedge ap_clk) begin
@@ -1066,11 +1028,11 @@ end
         current_tile_row <= 16'd0;
         current_tile_col <= 16'd0;
         current_inner_k <= 16'd0;
-        chain_complete <= 1'b0;
         chain_active <= 1'b1;
         // Starting matrix chaining mode
       end
     end
+
 
     // complete write response
     if (s_axi_control_bvalid && s_axi_control_bready)
@@ -1104,6 +1066,8 @@ end
           start_pulse <= 1'b1;
       end
 
+
+
       // register writes with byte-merge
       case (awaddr_word)
         A_LSB:          addr_a_reg[31:0]   <= merge_by_wstrb(addr_a_reg[31:0],   wdata_latched, wstrb_latched);
@@ -1133,10 +1097,10 @@ end
           chain_mode_en <= wdata_latched[0];
           if (wdata_latched[0]) begin
             // Clear completion flags when starting new operation
-            chain_complete <= 1'b0;
             chain_active <= 1'b0;
           end
         end
+
 
         // Streaming control registers
         BUFFER_CTRL: begin
@@ -1153,22 +1117,36 @@ end
         STREAM_CONFIG: begin
           stream_mode_en <= wdata_latched[0];
           auto_buffer_switch <= wdata_latched[1];
-          if (wdata_latched[16]) begin  // Reset computation IDs
-            next_comp_id <= 16'h1;
-            completed_comp_id <= 16'h0;
-          end
+   
         end
+       
 
-        COMPUTATION_ID: begin
-          // Allow manual setting of computation IDs for debugging
-          ping_comp_id <= merge_by_wstrb(ping_comp_id, wdata_latched[15:0], wstrb_latched[1:0]);
-          pong_comp_id <= merge_by_wstrb(pong_comp_id, wdata_latched[31:16], wstrb_latched[3:2]);
-        end
+        // COMPUTATION_ID: begin
+        //   // Allow manual setting of computation IDs for debugging
+        //   ping_comp_id <= merge_by_wstrb(ping_comp_id, wdata_latched[15:0], wstrb_latched[1:0]);
+        //   pong_comp_id <= merge_by_wstrb(pong_comp_id, wdata_latched[31:16], wstrb_latched[3:2]);
+        // end
         DBG_BUF_INDEX:  debug_buffer_index <= merge_by_wstrb(debug_buffer_index, wdata_latched, wstrb_latched);
         default: ;
       endcase
     end
   end
+              // Handle tile stepping for matrix chaining - 3-level nested loop
+  if (current_state == S_CHAIN_NEXT_TILE) begin
+        if (current_inner_k < tiles_per_inner - 1) begin
+          // Move to next inner dimension for same output tile
+          current_inner_k <= current_inner_k + 1;
+        end else if (current_tile_col < tiles_per_col - 1) begin
+          // Move to next column in same row, reset inner k
+          current_inner_k <= 16'd0;
+          current_tile_col <= current_tile_col + 1;
+        end else begin
+          // Move to first column of next row, reset inner k
+          current_inner_k <= 16'd0;
+          current_tile_col <= 16'd0;
+          current_tile_row <= current_tile_row + 1;
+        end
+      end
 end
 
 
@@ -1387,61 +1365,17 @@ end
         completed_comp_id <= pong_comp_id;
       end
     end
+        if (awaddr_word == STREAM_CONFIG && wdata_latched[16]) begin  // Reset computation IDs
+            next_comp_id <= 16'h1;
+        
+          end
+        if (awaddr_word == COMPUTATION_ID) begin
+          // Allow manual setting of computation IDs for debugging
+          ping_comp_id <= merge_by_wstrb(ping_comp_id, wdata_latched[15:0], wstrb_latched[1:0]);
+          pong_comp_id <= merge_by_wstrb(pong_comp_id, wdata_latched[31:16], wstrb_latched[3:2]);
+        end
   end
 
-// Replace the entire write engine always block with this:
-// always @(posedge ap_clk) begin
-//   if (!ap_rst_n) begin
-//     write_active      <= 1'b0;
-//     write_beat_count  <= 8'd0;
-//     write_data_reg    <= 128'd0;
-//     write_last_reg    <= 1'b0;
-//     wbeats_sent       <= 8'd0;
-//     debug_wbeats_sent <= 8'd0;
-//   end else begin
-//     case (current_state)
-//       // Initialize write engine after AW handshake
-//       S_WRITE_OUT_ADDR: begin
-//         if (m_axi_gmem_awready) begin
-//           write_active     <= 1'b1;
-//           write_beat_count <= 8'd0;
-//           write_data_reg   <= output_data_buffer[8'd0];
-//           write_last_reg   <= 1'b0;
-//           wbeats_sent      <= 8'd0;
-//         end
-//       end
-
-//       // Drive W channel - only advance on WREADY handshakes
-//       S_WRITE_OUT_DATA: begin
-//         if (write_active && m_axi_gmem_wready) begin
-//           wbeats_sent <= wbeats_sent + 1'b1;
-
-//           if (write_beat_count == 8'd63) begin
-//             // This cycle completes the last beat
-//             write_active     <= 1'b0;
-//             write_last_reg   <= 1'b0;
-//             debug_wbeats_sent <= wbeats_sent + 1'b1; // Capture final count
-//           end else begin
-//             // Advance to next beat
-//             write_beat_count <= write_beat_count + 1'b1;
-//             write_data_reg   <= output_data_buffer[write_beat_count + 1'b1];
-//             write_last_reg   <= (write_beat_count + 1'b1 == 8'd63);
-//           end
-//         end
-//       end
-
-//       // Clear debug counter when starting new operation
-//       S_IDLE: begin
-//         if (start_pulse) begin
-//           wbeats_sent       <= 8'd0;
-//           debug_wbeats_sent <= 8'd0;
-//         end
-//       end
-
-//       default: ; // no change
-//     endcase
-//   end
-// end
 // ---- sequential write engine (only mutate your regs here)
 always @(posedge ap_clk) begin
   if (!ap_rst_n) begin
@@ -1511,10 +1445,10 @@ end
         if (stream_mode_en) begin
           // Streaming mode: check for buffer start requests
           if (ping_start_req && ping_input_ready) begin
-            buffer_select = 1'b0;  // Use ping buffer
+            // buffer_select = 1'b0;  // Use ping buffer
             next_state = S_FETCH_ACT_ADDR;
           end else if (pong_start_req && pong_input_ready) begin
-            buffer_select = 1'b1;  // Use pong buffer
+            // buffer_select = 1'b1;  // Use pong buffer
             next_state = S_FETCH_ACT_ADDR;
           end
         end else begin
