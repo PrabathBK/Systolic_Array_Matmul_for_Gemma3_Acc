@@ -78,6 +78,10 @@ The tiling implementation allows larger matrix multiplications by decomposing th
 - ✅ **Hardware implementation successful - Benchmark**
 ![Systolic SOC Benchmark](https://github.com/PrabathBK/Systolic_Array_Matmul_for_Gemma3_Acc/blob/main/Results/systolic_soc_implementation.png)
 
+- ✅ **Hardware implementation successful - Offload**
+![Systolic SOC offload](https://github.com/PrabathBK/Systolic_Array_Matmul_for_Gemma3_Acc/blob/main/Results/offload_result.jpeg)
+
+
 #### Tiling IP (32×32 using 16×16 systolic array) on SoC
 - ✅ **Implementation Results**
 ![Systolic SOC Benchmark](https://github.com/PrabathBK/Systolic_Array_Matmul_for_Gemma3_Acc/blob/main/Results/Tiling_log.png)
